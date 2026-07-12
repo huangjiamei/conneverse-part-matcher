@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conneverse Part Matcher</title>
+  <style>
+    :root { --ink:#122526; --muted:#687878; --paper:#f5f2e9; --card:#fffdf7; --line:#d8d7ce; --teal:#0c6766; --orange:#ee7a45; --green:#198754; --red:#bb3a36; }
+    * { box-sizing: border-box; }
+    body { margin:0; color:var(--ink); background:radial-gradient(circle at 85% 0,#d9ece5 0,transparent 32%),var(--paper); font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    header { max-width:1440px; margin:auto; padding:32px 32px 18px; display:flex; justify-content:space-between; align-items:end; gap:24px; }
+    .eyebrow { color:var(--teal); font-size:12px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+    h1 { margin:4px 0 0; font:700 clamp(28px,4vw,48px)/1.05 Georgia,serif; }
+    header p { max-width:510px; margin:0; color:var(--muted); }
+    main { max-width:1440px; margin:auto; padding:16px 32px 48px; display:grid; grid-template-columns:minmax(300px,420px) 1fr; gap:22px; align-items:start; }
+    .panel { background:rgba(255,253,247,.9); border:1px solid var(--line); border-radius:18px; box-shadow:0 16px 45px rgba(24,51,49,.08); }
+    .form-panel { padding:24px; position:sticky; top:18px; }
+    .section-title { margin:0 0 4px; font-size:18px; }
+    .section-hint { margin:0 0 20px; color:var(--muted); font-size:13px; }
+    .grid-3 { display:grid; grid-template-columns:.7fr 1fr 1.2fr; gap:10px; }
+    label.field { display:block; margin:0 0 14px; color:#405252; font-size:12px; font-weight:750; letter-spacing:.02em; }
+    input,select { width:100%; margin-top:6px; padding:11px 12px; color:var(--ink); background:#fff; border:1px solid #c8cdc7; border-radius:9px; font:inherit; outline:none; transition:.15s; }
+    input:focus,select:focus { border-color:var(--teal); box-shadow:0 0 0 3px rgba(12,103,102,.12); }
+    .toggle { display:flex; gap:10px; align-items:flex-start; margin:4px 0 18px; padding:12px; border-radius:10px; background:#eef5f1; color:#405252; font-size:13px; }
+    .toggle input { width:auto; margin:3px 0 0; accent-color:var(--teal); }
+    button { width:100%; border:0; border-radius:10px; padding:13px 16px; color:white; background:var(--teal); font-weight:800; font-size:15px; cursor:pointer; box-shadow:0 8px 18px rgba(12,103,102,.2); }
+    button:hover { background:#095857; } button:disabled { opacity:.55; cursor:wait; }
+    .results { min-height:620px; padding:24px; }
+    .results-head { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }
+    .status { color:var(--muted); font-size:13px; }
+    .empty { min-height:490px; display:grid; place-content:center; text-align:center; color:var(--muted); }
+    .empty-mark { width:68px; height:68px; margin:0 auto 14px; display:grid; place-items:center; border:1px dashed #9aaba8; border-radius:50%; color:var(--teal); font:700 26px Georgia,serif; }
+    .summary { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:10px; margin-bottom:18px; }
+    .metric { padding:14px; border:1px solid var(--line); border-radius:12px; background:white; }
+    .metric small { display:block; color:var(--muted); }
+    .metric strong { display:block; margin-top:3px; font-size:18px; overflow-wrap:anywhere; }
+    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:11px; font-weight:850; letter-spacing:.04em; }
+    .match { color:#0b673e; background:#ddf3e6; } .reject { color:#982d2a; background:#f9dfdc; } .review { color:#805318; background:#faebcc; } .none { color:#4e6161; background:#e7ecea; }
+    .candidate-list { display:grid; gap:10px; }
+    .candidate { border:1px solid var(--line); border-radius:13px; padding:16px; background:#fff; }
+    .candidate-top { display:flex; justify-content:space-between; gap:14px; align-items:start; }
+    .candidate h3 { margin:0; font-size:15px; line-height:1.4; }
+    .candidate h3 a { color:var(--ink); text-decoration:none; } .candidate h3 a:hover { color:var(--teal); text-decoration:underline; }
+    .candidate-meta { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:10px; color:var(--muted); font-size:12px; }
+    .compat { margin-top:9px; color:#405252; font-size:12px; }
+    details { margin-top:18px; } summary { color:var(--teal); cursor:pointer; font-weight:700; }
+    pre { max-height:360px; overflow:auto; padding:14px; background:#102728; color:#dce9e6; border-radius:10px; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; }
+    .error { padding:14px; color:#872e2a; background:#fde7e3; border:1px solid #efb9b1; border-radius:10px; }
+    @media (max-width:900px) { header { display:block; } header p { margin-top:12px; } main { grid-template-columns:1fr; } .form-panel { position:static; } .summary { grid-template-columns:1fr 1fr; } }
+    @media (max-width:560px) { header,main { padding-left:16px; padding-right:16px; } .grid-3 { grid-template-columns:1fr; gap:0; } .summary { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><div class="eyebrow">Conneverse · Experimental single-part flow</div><h1>Part Matcher</h1></div>
+    <p>输入一个 Part Line Item，运行当前的 eBay 检索、MPN 标注、n-gram fitment 和可选 LLM 复核。本页是实验工具，不代表生产采购安全门。</p>
+  </header>
+  <main>
+    <section class="panel form-panel">
+      <h2 class="section-title">Source Part Info</h2>
+      <p class="section-hint">带 * 的字段用于检索和适配判断。</p>
+      <form id="match-form">
+        <div class="grid-3">
+          <label class="field">年份 *<input name="year" value="2019" placeholder="2019" required></label>
+          <label class="field">品牌 *<input name="make" value="Subaru" placeholder="Subaru" required></label>
+          <label class="field">车型 *<input name="model_guess" value="Impreza" placeholder="Impreza" required></label>
+        </div>
+        <label class="field">原始车型描述<input name="vehicle_raw" value="2019 SUBA Impreza w/Continuously Variable Transmission" placeholder="维修单中的原始描述"></label>
+        <label class="field">零件描述 *<input name="part_description" value="Lower grille" placeholder="Lower grille" required></label>
+        <div class="grid-3" style="grid-template-columns:1fr 2fr">
+          <label class="field">零件类型<select name="part_type"><option value="oem">OEM</option><option value="aftermarket">Aftermarket</option><option value="">未指定</option></select></label>
+          <label class="field">零件号 / MPN<input name="part_number" value="57731FL30A" placeholder="可留空并使用车型关键词检索"></label>
+        </div>
+        <label class="toggle"><input type="checkbox" name="use_llm"><span><strong>启用 LLM 语义复核</strong><br>仅处理 n-gram 的 review 候选，需要配置 OPENAI_API_KEY。</span></label>
+        <button id="submit-button" type="submit">开始匹配</button>
+      </form>
+    </section>
+
+    <section class="panel results" id="result-panel" aria-live="polite">
+      <div class="results-head"><div><h2 class="section-title">匹配结果</h2><div class="status" id="status">等待输入</div></div></div>
+      <div id="result-content" class="empty"><div><div class="empty-mark">→</div><strong>结果将在这里显示</strong><div>提交表单后可查看总体判断和候选明细。</div></div></div>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector("#match-form");
+    const button = document.querySelector("#submit-button");
+    const statusLine = document.querySelector("#status");
+    const content = document.querySelector("#result-content");
+    const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"})[char]);
+    const labelView = label => label === 1 ? ["匹配", "match"] : label === 0 ? ["拒绝", "reject"] : ["待复核", "review"];
+    const recordLabelView = record => record.label_source === "NO_CANDIDATES" ? ["无候选", "none"] : labelView(record.label);
+    const safeUrl = value => /^https?:\/\//i.test(String(value || "")) ? escapeHtml(value) : "";
+    const priceView = price => price && price.value ? `${escapeHtml(price.currency || "USD")} ${escapeHtml(price.value)}` : "价格未知";
+
+    function renderResult(record) {
+      const candidates = record.candidate_info_list || [];
+      const meta = record.dataset_meta || {};
+      const [labelText, labelClass] = recordLabelView(record);
+      const cards = candidates.map((candidate, index) => {
+        const [candidateText, candidateClass] = labelView(candidate.candidate_label);
+        const title = escapeHtml(candidate.title || `Candidate ${index + 1}`);
+        const itemUrl = safeUrl(candidate.item_web_url);
+        const titleNode = itemUrl ? `<a href="${itemUrl}" target="_blank" rel="noopener noreferrer">${title}</a>` : title;
+        const compatibility = Object.values(candidate.compatibility || {}).filter(Boolean).join(" · ");
+        const ngram = candidate.ngram_fitment?.decision ? `n-gram: ${candidate.ngram_fitment.decision}` : "";
+        return `<article class="candidate"><div class="candidate-top"><h3>${index + 1}. ${titleNode}</h3><span class="badge ${candidateClass}">${candidateText}</span></div><div class="candidate-meta"><span>${priceView(candidate.price)}</span><span>${escapeHtml(candidate.condition || "成色未知")}</span><span>${escapeHtml(candidate.candidate_label_source || "未标注")}</span><span>${escapeHtml(ngram)}</span></div>${compatibility ? `<div class="compat">适配信息：${escapeHtml(compatibility)}</div>` : ""}</article>`;
+      }).join("");
+      content.className = "";
+      content.innerHTML = `<div class="summary"><div class="metric"><small>总体判断</small><strong><span class="badge ${labelClass}">${labelText}</span></strong></div><div class="metric"><small>判断来源</small><strong>${escapeHtml(record.label_source || "—")}</strong></div><div class="metric"><small>有效命中</small><strong>${escapeHtml(meta.candidate_hit_count ?? 0)} / ${candidates.length}</strong></div><div class="metric"><small>检索层级</small><strong>${escapeHtml(meta.level_used || "—")}</strong></div></div><div class="candidate-list">${cards || '<div class="empty"><div>没有检索到候选零件。</div></div>'}</div><details><summary>查看原始 JSON</summary><pre id="raw-json"></pre></details>`;
+      document.querySelector("#raw-json").textContent = JSON.stringify(record, null, 2);
+    }
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const fields = new FormData(form);
+      const sourcePartInfo = {
+        vehicle: { year: fields.get("year"), make: fields.get("make"), model_guess: fields.get("model_guess"), vehicle_raw: fields.get("vehicle_raw") },
+        part_description: fields.get("part_description"), part_type: fields.get("part_type"), part_number: fields.get("part_number")
+      };
+      button.disabled = true; button.textContent = "正在匹配…"; statusLine.textContent = "正在请求 eBay 并运行适配判断";
+      content.className = "empty"; content.innerHTML = '<div><div class="empty-mark">···</div><strong>流程运行中</strong><div>外部接口可能需要几秒钟。</div></div>';
+      try {
+        const response = await fetch("/api/match", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({source_part_info:sourcePartInfo, use_llm:fields.get("use_llm") === "on"}) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `请求失败 (${response.status})`);
+        renderResult(result); statusLine.textContent = `完成 · ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        content.className = ""; content.innerHTML = `<div class="error"><strong>无法完成匹配</strong><div>${escapeHtml(error.message)}</div></div>`; statusLine.textContent = "运行失败";
+      } finally { button.disabled = false; button.textContent = "开始匹配"; }
+    });
+  </script>
+</body>
+</html>

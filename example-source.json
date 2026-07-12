@@ -1,0 +1,11 @@
+{
+  "vehicle": {
+    "year": "2024",
+    "make": "Chevrolet",
+    "model_guess": "Silverado",
+    "vehicle_raw": "2024 Chevrolet Silverado 1500 LT Crew Cab 4WD"
+  },
+  "part_description": "LT Bumper bracket",
+  "part_type": "aftermarket",
+  "part_number": "84878964"
+}
