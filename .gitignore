@@ -19,3 +19,5 @@ env/
 outputs/
 tmp/
 .DS_Store
+response.json
+*.response.json
