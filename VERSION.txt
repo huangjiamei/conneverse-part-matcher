@@ -1,0 +1,4 @@
+Build date: 2026-07-11
+Base source commit: 6bd3599
+Source state: current workspace files (includes uncommitted matcher changes present at build time)
+Python: >=3.10
