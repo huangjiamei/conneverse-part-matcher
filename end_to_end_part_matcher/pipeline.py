@@ -207,6 +207,47 @@ def fetch_and_label_candidates(
 
 def build_candidate_info(detail: Mapping[str, Any], *, target_mpn_raw: str) -> dict[str, Any]:
     candidate_label, candidate_label_source, mpns, normalized_mpns = label_by_mpn(detail, target_mpn_raw)
+
+    # ---------- Optimizer 需要的字段 (从 raw detail 提取) ----------
+    # 都是浅拷贝, 不做归一化/单位换算 —— optimizer/adapter 层负责解释
+    seller = detail.get("seller") or {}
+    avails = detail.get("estimatedAvailabilities") or []
+    availability = avails[0] if avails else {}
+    shipping_opts = detail.get("shippingOptions") or []
+    shipping = shipping_opts[0] if shipping_opts else {}
+    returns = detail.get("returnTerms") or {}
+    return_period = returns.get("returnPeriod") or {}
+    location = detail.get("itemLocation") or {}
+
+    # warranty 从 aspects 提取 raw 值 (归一化在 optimizer 侧)
+    warranty_raw = None
+    for aspect in (detail.get("localizedAspects") or []):
+        if aspect.get("name") in ("Manufacturer Warranty", "Warranty"):
+            warranty_raw = aspect.get("value")
+            break
+
+    optimizer_fields = {
+        # 卖家信誉
+        "seller_username": seller.get("username"),
+        "seller_feedback_pct": seller.get("feedbackPercentage"),
+        "seller_feedback_count": seller.get("feedbackScore"),
+        "top_rated": detail.get("topRatedBuyingExperience"),
+        # 库存
+        "availability_status": availability.get("estimatedAvailabilityStatus"),
+        "available_qty": availability.get("estimatedAvailableQuantity"),
+        "sold_qty": availability.get("estimatedSoldQuantity"),
+        # 交付
+        "shipping_cost": (shipping.get("shippingCost") or {}).get("value"),
+        "delivery_min_date": shipping.get("minEstimatedDeliveryDate"),
+        "delivery_max_date": shipping.get("maxEstimatedDeliveryDate"),
+        # 保障
+        "returns_accepted": returns.get("returnsAccepted"),
+        "return_period_days": return_period.get("value") if return_period.get("unit") == "CALENDAR_DAY" else None,
+        "warranty_raw": warranty_raw,
+        # 地理
+        "country": location.get("country"),
+    }
+
     return {
         "title": detail.get("title") or "",
         "subtitle": detail.get("subtitle") or "",
@@ -219,6 +260,8 @@ def build_candidate_info(detail: Mapping[str, Any], *, target_mpn_raw: str) -> d
         "price": detail.get("price"),
         "candidate_label": candidate_label,
         "candidate_label_source": candidate_label_source,
+        # 新增: optimizer 用字段, 集中在一个 dict 下, 现有前端/调用方不受影响
+        "optimizer_fields": optimizer_fields,
     }
 
 
