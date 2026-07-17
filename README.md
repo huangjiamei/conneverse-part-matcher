@@ -62,3 +62,34 @@ python -m end_to_end_part_matcher.pipeline `
 - `example-source.json`：示例输入
 
 本包不包含原项目的 `.env`、真实 API Key、Git 历史、缓存或完整测试数据。
+
+# Matcher接口
+## 启动
+terminal 1: 
+```powershell
+source .venv/bin/activate
+```
+
+```powershell
+uvicorn end_to_end_part_matcher.service:app --port 8001 --reload
+```
+
+## 测试
+terminal 2:
+```powershell
+curl http://127.0.0.1:8001/health
+```
+
+```powershell
+curl -X POST http://127.0.0.1:8001/api/match \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_part_info": {
+      "vehicle": {"year":"2024","make":"Chevrolet","model_guess":"Silverado","vehicle_raw":"2024 Chevrolet Silverado 1500 LT Crew Cab 4WD"},
+      "part_description": "LT Bumper bracket",
+      "part_type": "aftermarket",
+      "part_number": "84878964"
+    },
+    "use_llm": false
+  }'
+```
