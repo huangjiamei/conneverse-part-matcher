@@ -248,6 +248,13 @@ def build_candidate_info(detail: Mapping[str, Any], *, target_mpn_raw: str) -> d
         "country": location.get("country"),
     }
 
+    main_image = (detail.get("image") or {}).get("imageUrl")
+    additional_images = [
+        (img or {}).get("imageUrl")
+        for img in (detail.get("additionalImages") or [])[:3]
+        if (img or {}).get("imageUrl")
+    ]
+
     return {
         "title": detail.get("title") or "",
         "subtitle": detail.get("subtitle") or "",
@@ -262,6 +269,8 @@ def build_candidate_info(detail: Mapping[str, Any], *, target_mpn_raw: str) -> d
         "candidate_label_source": candidate_label_source,
         # 新增: optimizer 用字段, 集中在一个 dict 下, 现有前端/调用方不受影响
         "optimizer_fields": optimizer_fields,
+        "image_url": main_image,
+        "additional_image_urls": additional_images,
     }
 
 
