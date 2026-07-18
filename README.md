@@ -64,7 +64,7 @@ python -m end_to_end_part_matcher.pipeline `
 本包不包含原项目的 `.env`、真实 API Key、Git 历史、缓存或完整测试数据。
 
 # Matcher接口
-## 启动
+## 一、启动
 terminal 1: 
 ```powershell
 source .venv/bin/activate
@@ -74,7 +74,7 @@ source .venv/bin/activate
 uvicorn end_to_end_part_matcher.service:app --port 8001 --reload
 ```
 
-## 测试
+## 二、测试
 terminal 2:
 ```powershell
 curl http://127.0.0.1:8001/health
