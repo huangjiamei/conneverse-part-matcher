@@ -6,6 +6,8 @@ Run with:
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -26,6 +28,13 @@ from algorithms.optimizer import (
 )
 
 DEFAULT_PRESET = "sameDayJob"
+
+# uvicorn 只给自己的 logger 装 handler, root 是空的; 不配置的话 pipeline 里
+# 那句 "compat: using category X from ..." 看不到。
+logging.basicConfig(
+    level=os.getenv("MATCHER_LOG_LEVEL", "INFO"),
+    format="%(levelname)s %(name)s: %(message)s",
+)
 
 
 app = FastAPI(
@@ -66,6 +75,11 @@ class MatchRequest(BaseModel):
     source_part_info: SourcePartInfo
     use_llm: bool = Field(default=False)
     preset: Optional[str] = Field(default=None)
+    # eBay 类目路由: 调用方 (/search 选了具体 Part) 查 PCdb -> eBay 映射表得到。
+    # 有值 → 第 2 档 compat 用它 (primary 空则依次试 fallback);
+    # null → 回退 part_desc_to_category.json 查表 (RO PartLine / 自由文本)。
+    ebay_category_id: Optional[int] = Field(default=None)
+    ebay_fallback_category_ids: List[int] = Field(default_factory=list)
 
 
 @app.get("/health")
@@ -80,6 +94,8 @@ def match(request: MatchRequest) -> dict[str, Any]:
         result = match_source_part(
             request.source_part_info.model_dump(),
             config=PipelineConfig(use_llm=request.use_llm),
+            ebay_category_id=request.ebay_category_id,
+            ebay_fallback_category_ids=request.ebay_fallback_category_ids,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc) or exc.__class__.__name__)
