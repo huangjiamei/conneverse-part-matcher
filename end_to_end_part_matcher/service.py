@@ -13,6 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .pipeline import PipelineConfig, match_source_part
+from .taxonomy import (
+    DEFAULT_ROOT_CATEGORY_ID,
+    MOTORS_CATEGORY_TREE_ID,
+    fetch_taxonomy,
+)
 
 from algorithms.optimizer import (
     build_candidate_from_matcher,
@@ -84,6 +89,44 @@ def match(request: MatchRequest) -> dict[str, Any]:
 
     result["optimizer_result"] = _run_optimizer(candidates_raw, preset_name)
     return result
+
+
+# ============================================================
+# /api/taxonomy: 拉 eBay 分类树 (离线灌库用, 不参与匹配)
+# ============================================================
+
+@app.get("/api/taxonomy")
+def get_taxonomy(
+    root_category_id: int = DEFAULT_ROOT_CATEGORY_ID,
+    category_tree_id: str = MOTORS_CATEGORY_TREE_ID,
+    resolve_ancestors: bool = True,
+) -> dict[str, Any]:
+    """
+    Fetch eBay Motors taxonomy subtree for the given root category.
+    Default 6028 = Parts & Accessories (excludes whole vehicles / tools).
+
+    Motors categories live in category tree 100, not the EBAY_US tree 0.
+
+    Returns a flat list of categories:
+    {
+      "categories": [
+        {"id": 6028, "name": "Parts & Accessories", "parent_id": 6000, "level": 0,
+         "is_leaf": false, "full_path": "eBay Motors|Parts & Accessories"},
+        {"id": 6030, "name": "Car & Truck Parts & Accessories", "parent_id": 6028, "level": 1, ...},
+        ...
+      ],
+      "total": N,
+      "fetched_at": "2026-07-26T..."
+    }
+    """
+    try:
+        return fetch_taxonomy(
+            root_category_id,
+            category_tree_id=category_tree_id,
+            resolve_ancestors=resolve_ancestors,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or exc.__class__.__name__)
 
 
 # ============================================================

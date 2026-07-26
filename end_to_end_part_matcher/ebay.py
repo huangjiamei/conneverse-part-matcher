@@ -84,7 +84,7 @@ class EbayClient:
         self._token_expires_at = time.time() + max(0, int(data.get("expires_in", 7200)) - 60)
         return self._token
 
-    def _browse_get(self, path: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    def _api_get(self, path: str, params: Mapping[str, Any]) -> dict[str, Any]:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
         return request_json(
             f"{EBAY_API_BASE}{path}?{query}",
@@ -140,8 +140,19 @@ class EbayClient:
         if category_id:
             params["category_ids"] = category_id
         params.update(extra_params or {})
-        return self._browse_get("/buy/browse/v1/item_summary/search", params).get("itemSummaries") or []
+        return self._api_get("/buy/browse/v1/item_summary/search", params).get("itemSummaries") or []
 
     def get_item(self, item_id: str) -> dict[str, Any]:
         encoded = urllib.parse.quote(item_id, safe="")
-        return self._browse_get(f"/buy/browse/v1/item/{encoded}", {"fieldgroups": "PRODUCT"})
+        return self._api_get(f"/buy/browse/v1/item/{encoded}", {"fieldgroups": "PRODUCT"})
+
+    def get_category_subtree(self, *, category_id: int | str, category_tree_id: str) -> dict[str, Any]:
+        """Taxonomy API: one node plus its whole descendant subtree.
+
+        Note eBay Motors is NOT in the EBAY_US tree (id 0) — it has its own tree
+        (id 100). Passing a Motors category id with tree 0 gets errorId 62005.
+        """
+        return self._api_get(
+            f"/commerce/taxonomy/v1/category_tree/{category_tree_id}/get_category_subtree",
+            {"category_id": str(category_id)},
+        )
