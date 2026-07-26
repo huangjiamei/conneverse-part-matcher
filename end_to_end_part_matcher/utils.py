@@ -77,6 +77,7 @@ def normalize_source_part_info(data: Mapping[str, Any]) -> dict[str, Any]:
             "make": expand_make(vehicle.get("make")),
             "model_guess": resolve_vehicle_model(vehicle),
             "vehicle_raw": str(vehicle.get("vehicle_raw") or "").strip(),
+            "sub_model": str(vehicle.get("sub_model") or "").strip(),
         },
         "part_description": str(source.get("part_description") or "").strip(),
         "part_type": source.get("part_type"),

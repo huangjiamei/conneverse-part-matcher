@@ -123,6 +123,11 @@ def search_candidates(
     has_vehicle_context = all(vehicle.get(k) for k in ("year", "make", "model_guess"))
     if category_info and category_info.get("supports_compat") and has_vehicle_context:
         compat_filter = f"Year:{vehicle['year']};Make:{vehicle['make']};Model:{vehicle['model_guess']}"
+        # eBay compat 里 submodel 这一层的字段名是 Trim, 不是 SubModel。
+        # 空值 = 用户选了 "All submodels", 此时不加该段, 保持原来的三字段召回。
+        sub_model = str(vehicle.get("sub_model") or "").strip()
+        if sub_model:
+            compat_filter += f";Trim:{sub_model}"
         try:
             result = ebay.search_by_compatibility(
                 query=part_description,

@@ -47,6 +47,7 @@ class Vehicle(BaseModel):
     make: str
     model_guess: str
     vehicle_raw: Optional[str] = ""
+    sub_model: Optional[str] = ""  # eBay compat 里叫 Trim; 空串 = "All submodels"
 
 
 class SourcePartInfo(BaseModel):
