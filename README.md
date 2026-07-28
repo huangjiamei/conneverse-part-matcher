@@ -40,7 +40,7 @@ EBAY_CLIENT_SECRET=...
 python -m end_to_end_part_matcher.web --open
 ```
 
-默认地址为 <http://127.0.0.1:8000/>。该服务器只适合本地使用，不要直接暴露到公网。
+默认地址为 [http://127.0.0.1:8000/](http://127.0.0.1:8000/)。该服务器只适合本地使用，不要直接暴露到公网。
 
 ## CLI 示例
 
@@ -64,8 +64,11 @@ python -m end_to_end_part_matcher.pipeline `
 本包不包含原项目的 `.env`、真实 API Key、Git 历史、缓存或完整测试数据。
 
 # Matcher接口
+
 ## 一、启动
+
 terminal 1: 
+
 ```powershell
 source .venv/bin/activate
 ```
@@ -75,7 +78,9 @@ uvicorn end_to_end_part_matcher.service:app --port 8001 --reload
 ```
 
 ## 二、测试
+
 terminal 2:
+
 ```powershell
 curl http://127.0.0.1:8001/health
 ```
@@ -93,3 +98,4 @@ curl -X POST http://127.0.0.1:8001/api/match \
     "use_llm": false
   }'
 ```
+

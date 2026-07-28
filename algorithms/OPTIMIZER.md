@@ -1,243 +1,178 @@
-# Conneverse Optimizer 完整参考
+```markdown
+# Conneverse Optimizer New
 
-候选状态、Optimizer 参数、Preset 组合的完整参考文档。
+> 针对**单零件推荐**范围。打分标准固定客观,用户只通过第 1 层(硬约束)和第 3 层(权重)影响结果。
 
----
-
-## 一、算法架构（三层）
-
-```
-┌─ Layer 3: preset ─────────────────────────────┐
-│  4 个场景组合 (sameDayJob / costFirst / ...)   │
-│  = GatesConfig + ScoringConfig + Weights      │
-│  背后就是把 layer 1/2 的所有参数打包起来        │
-└────────────────────────────────────────────────┘
-              ↓ 参数注入
-┌─ Layer 2: config ──────────────────────────────┐
-│  GatesConfig (6 个 gate 参数)                  │
-│  ScoringConfig (8 个 bonus + 先验)             │
-│  Weights (price/quality 权重)                  │
-│  16 个参数, 都是命名字段, 可覆盖               │
-└────────────────────────────────────────────────┘
-              ↓ 被 optimize() 消费
-┌─ Layer 1: 函数 ────────────────────────────────┐
-│  gate_check(candidate, GatesConfig)            │
-│  quality_score(candidate, ScoringConfig)       │
-│  price_score(candidate, min_eligible_price)    │
-│  optimize(candidates, preset OR configs OR weights)
-└────────────────────────────────────────────────┘
+## 一、算法三层结构
 
 ```
-
-**关键理解**：Preset 不是独立逻辑，只是 Layer 2 的一份参数组合。同一个 `optimize()` 函数既可以接 preset（Layer 3），也可以直接接 config（Layer 2），这让用户主 UI（选 preset）和 Debug UI（改具体参数）**共用同一套后端**。
-
----
-
-## 二、候选状态的完整可能性
-
-一条候选从 matcher 出来到最终显示在卡片上，取决于两个独立判定。
-
-### 判定 1: matcher 的 label
-
-由 matcher pipeline 决定，跟 optimizer 无关。
-
-
-| label  | UI 显示          | 含义                                                   |
-| ------ | -------------- | ---------------------------------------------------- |
-| `1`    | ✓ **Verified** | matcher 认为 MPN 精确匹配（EXACT_MPN_MATCH 等）               |
-| `0`    | **Rejected**   | matcher 认为不匹配（NOISY_NEGATIVE / NGRAM_FITMENT_REJECT） |
-| `null` | **Uncertain**  | matcher 判不了（MPN 空 / n-gram 走 review）                 |
-
-
-**只有** `label=1` **的候选才会进 optimizer 打分。** 其他两类展示在"其他候选"折叠区里。
-
-### 判定 2: optimizer 的处理结果（仅对 label=1）
-
-label=1 的候选进 optimizer 后，只有两种结局：
-
-
-| 结局           | UI 显示                              | 含义                         |
-| ------------ | ---------------------------------- | -------------------------- |
-| 通过 gate + 排名 | **Rank N** badge（Rank 1 加 Award ⭐） | 显示 optimizer 排序、总分、价格分、质量分 |
-| 被 gate 拒     | **Filtered** badge + reason        | 显示被哪个 gate 拒的原因            |
-
-
----
-
-## 三、状态组合矩阵
-
-真实卡片上会看到的状态组合：
-
-
-| Verified | Rank               | Filtered                | 含义                                      |
-| -------- | ------------------ | ----------------------- | --------------------------------------- |
-| ✓        | **Rank 1** (Award) | ✗                       | Top pick：MPN 匹配，optimizer 排第一           |
-| ✓        | Rank 2-N           | ✗                       | Verified 候选中的次选                         |
-| ✓        | ✗                  | ⚠ Filtered              | Verified 但被 gate 拒（Used / CN 卖家 / 差评卖家） |
-| ✗        | ✗                  | ✗ (显示 Uncertain)        | matcher 判不了，未走 optimizer                |
-| ✗        | ✗                  | ✗ (显示 Rejected/label=0) | matcher 判为不匹配，未走 optimizer              |
-
-
----
-
-## 四、Layer 2 参数详解
-
-Optimizer 内部对 label=1 的候选做的判定，全部由这 16 个参数控制。
-
-### GatesConfig — 6 个 gate 参数
-
-每个 gate 单独判定。任何一个不通过 → **Filtered**，reason 就是那个 gate 的失败原因。
-
-
-| #   | 参数                           | 类型          | 触发的 Filter reason       | 备注                                   |
-| --- | ---------------------------- | ----------- | ----------------------- | ------------------------------------ |
-| 1   | `allow_used`                 | bool        | `condition:used`        | 允许二手件进 optimizer                     |
-| 2   | `require_in_stock`           | bool        | `stock:out_of_stock`    | 缺货直接拒                                |
-| 3   | `min_seller_feedback_pct`    | float 0-100 | `seller_feedback:88.5%` | 卖家好评率低于阈值                            |
-| 4   | `min_seller_feedback_count`  | int         | `seller_count:96`       | 卖家累计评价数低于阈值                          |
-| 5   | `require_domestic`           | bool        | `country:CN`            | 只允许 US 卖家                            |
-| 6   | `max_fitment_complaint_rate` | float 0-1   | `fitment_risk:25%`      | 差评里 fitment 问题率上限（eBay 拿不到该数据，实际不启用） |
-
-
-### ScoringConfig — 8 个 scoring 参数
-
-Gate 通过的候选按这些参数打质量分（0-100）。
-
-
-| #   | 参数                        | 默认   | 影响                       |
-| --- | ------------------------- | ---- | ------------------------ |
-| 7   | `seller_pct_prior`        | 98.0 | Bayesian 收缩的先验值          |
-| 8   | `seller_pct_pseudo`       | 1000 | 先验 pseudo-count（越大越拉向先验） |
-| 9   | `warranty_year_1_bonus`   | +5   | ≥1 年保修加分                 |
-| 10  | `warranty_year_3_bonus`   | +10  | ≥3 年 追加（累计 +15）          |
-| 11  | `warranty_lifetime_bonus` | +15  | Lifetime 追加（累计 +30）      |
-| 12  | `top_rated_bonus`         | +5   | eBay Top Rated Seller    |
-| 13  | `returns_bonus`           | +5   | 支持退货且窗口 ≥30 天            |
-| 14  | `sold_qty_bonus`          | +5   | 累计销量 ≥100                |
-
-
-### Weights — 2 个权重参数
-
-Gate 通过的候选做最终排名：
-
-```
-total = w_price × price_score + w_quality × quality_score
-
+第 1 层  硬门槛 / 开关 (0/1)   →  候选 进 / 不进
+第 2 层  系统打分 (0–100)      →  每个大分客观打分(标准固定,不随用户变)
+第 3 层  用户权重 (百分比)      →  各大分占多少,加权出总排名
 ```
 
-
-| #   | 参数                | 说明    |
-| --- | ----------------- | ----- |
-| 15  | `weights.price`   | 价格分权重 |
-| 16  | `weights.quality` | 质量分权重 |
+- **快捷入口**:提供多个presets(= 第 1 层开关 + 第 3 层权重 的打包)
+- **高级入口**:用户自由组合第 1 层开关 + 第 3 层权重(先支持"一次性覆盖")
+- 两个入口都跑同一套第 2 层打分
 
 
-内部会归一化：`w_price / (price + quality) + w_quality / (price + quality) = 1.0`
+### 第 1 层 · 硬门槛 / 开关(决定"进不进")
 
----
-
-## 五、Preset 与参数的映射
-
-四个 preset 就是把上面 16 个参数按场景配好。**未列出的参数用默认值。**
-
-
-| 参数                           | sameDayJob | costFirst | qualityFirst | scheduled |
-| ---------------------------- | ---------- | --------- | ------------ | --------- |
-| `allow_used`                 | false      | false     | false        | false     |
-| `require_in_stock`           | true       | true      | true         | **false** |
-| `min_seller_feedback_pct`    | **97**     | 95        | **98**       | 95        |
-| `min_seller_feedback_count`  | **100**    | 50        | **500**      | 50        |
-| `require_domestic`           | **true**   | false     | **true**     | false     |
-| `max_fitment_complaint_rate` | 0.15       | 0.25      | 0.10         | 0.15      |
-| `weights.price`              | 40         | **80**    | **15**       | 55        |
-| `weights.quality`            | 60         | 20        | **85**       | 45        |
+| key                     | 作用                                       | 类型          |
+| ----------------------- | ---------------------------------------- | ----------- |
+| `availability_status`   | 能不能等 backorder(在库开关)                     | 用户开关(默认在库)  |
+| `condition`             | 要不要只收新件(require_new)                     | 用户开关(默认只新件) |
+| `seller_feedback_pct`   | 通用最低信誉线                                  | 固定门槛        |
+| `seller_feedback_count` | 通用最低评价数线                                 | 固定门槛        |
+| `delivery_days_min/max` | "X 天内必须到"硬截止;急件下没有到货预估的也一并过滤(设了才启用) | 可选门槛        |
+| `country`               | "仅美国货"合规要求                               | 可选开关(默认关)   |
 
 
-Scoring 里的 8 个 bonus 参数所有 preset 都用默认，暂时没差别。
+### 第 2 层 · 打分(每个大分 0–100)
 
----
+| 大分      | key                                                                                                                                       |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **价格分** | `price`、`shipping_cost`                                                                                                                   |
+| **速度分** | `delivery_days_min`、`delivery_days_max`                                                                                                   |
+| **质量分** | `seller_feedback_pct`、`seller_feedback_count`、`top_rated`、`warranty_years`、`returns_accepted`、`return_period_days`、`condition`、`sold_qty` |
 
-## 六、场景与用户意图对照
 
+### 第 3 层 · 权重(不消费候选字段)
 
-| Preset           | 用户场景         | 结果特点                                  |
-| ---------------- | ------------ | ------------------------------------- |
-| **sameDayJob**   | 车在架子上今天要修完   | 严过滤：拒 CN / 拒小卖家 / seller 卡 97%；质量优先   |
-| **costFirst**    | 客户不急，越便宜越好   | 宽过滤：CN 也接受；价格权重 80/20                 |
-| **qualityFirst** | 高端客户 / 大保险公司 | 最严过滤：seller 卡 98% × 500 好评；质量权重 85/15 |
-| **scheduled**    | 计划采购，可以等     | 允许缺货（backorder），CN 也可以，价格质量均衡         |
+| 参数               | 说明    |
+| ---------------- | ----- |
+| `weight_price`   | 价格分占比 |
+| `weight_speed`   | 速度分占比 |
+| `weight_quality` | 质量分占比 |
 
 
 ---
 
-## 七、Filter reason 完整语义参考
+## 二、算法数据说明
 
-用户看到 `Filtered: xxx` 时如何理解：
+### 1. 跨层的 key(既在第 1 层又在第 2 层)
 
+先卡下限、线上再比高低,不是重复:
 
-| Filter reason         | 意思           | 用户可能的响应                                          |
-| --------------------- | ------------ | ------------------------------------------------ |
-| `condition:used`      | 二手件被拒        | 切 preset 也没用（4 个 preset 都拒 Used）；未来可加"接受 Used"开关 |
-| `stock:out_of_stock`  | 缺货           | 切到 `scheduled` preset 可以接受 backorder             |
-| `seller_feedback:XX%` | 卖家好评率低       | 换到 `costFirst` 或 `scheduled`（放宽到 95%）            |
-| `seller_count:N`      | 卖家评价数少       | 除 `qualityFirst` 都是 50 或 100，看具体数字               |
-| `country:CN`          | 非美国卖家        | 换到 `costFirst` 或 `scheduled`（允许海外）               |
-| `fitment_risk:XX%`    | fitment 抱怨率高 | 目前不启用                                            |
+- `condition` → 第 1 层(可选 require_new)+ 第 2 层(件况分,New / New other / Used 递减扣分)
+- `seller_feedback_pct` / `seller_feedback_count` → 第 1 层(最低线)+ 第 2 层(信誉分)
+- `delivery_days_min/max` → 第 1 层(硬截止,可选)+ 第 2 层(速度分)
+
+### 2. 不参与三层的 2 个字段
+
+- `available_qty` → 可选"仅剩 X 件"提示,先不用(单件采购下无打分意义)
+- `brand` → (现在brand有的存储的是店铺名称)
+
+### 3. 预留口子(旧算法考虑过、现在 eBay 拿不到的打分数据)
+
+| key                      | 原打算衡量        | 现状                    |
+| ------------------------ | ------------ | --------------------- |
+| `product_rating`         | 产品星级(0–5)     | 恒 None,eBay 只给卖家级信誉   |
+| `product_review_count`   | 产品评价数        | 恒 None                |
+| `fitment_complaint_rate` | 装车抱怨率(0–1)    | 恒 None,需爬评论 + NLP     |
+| `fitment_review_sample`  | 抱怨率样本量       | 恒 None                |
+| `review_recency`         | 评论时效性(0–100) | 恒 None                |
+| `is_self_hosted_rating`  | 是否卖家自站评论     | 恒 False,eBay 全平台评论    |
 
 
 ---
 
-## 八、`optimize()` 参数注入的三种方式
 
-Layer 1 的 `optimize()` 函数接口：
+## 三、打分算法
 
-```python
-optimize(
-    candidates,
-    preset=None,           # 传 Preset 或 preset name, 从 Layer 3 打包一次
-    gates=None,            # 覆盖 preset 里的 gates 
-    scoring=None,          # 覆盖 preset 里的 scoring
-    weights_price=None,    # 覆盖 preset 里的 weights.price
-    weights_quality=None,  # 覆盖 preset 里的 weights.quality
-)
+> 常数均按 7,809 个真实 eBay item 校准(2026-07)。每个大分 0–100,标准固定,不随 preset 变。
+
+### 1. price
 
 ```
-
-**三种用法**：
-
-
-| 场景                       | 用法                                                                          |
-| ------------------------ | --------------------------------------------------------------------------- |
-| **用户主页选 preset**         | `optimize(cands, preset="sameDayJob")`                                      |
-| **Debug 页从 preset 出发微调** | `optimize(cands, preset="sameDayJob", gates=my_gates)`                      |
-| **Debug 页从零构造**          | `optimize(cands, gates=g, scoring=s, weights_price=40, weights_quality=60)` |
-
-
-这个设计让 preset 和显式参数**天然共存**——preset 兜底，任何一层可以被覆盖。方案 A 的 `/api/rerank` 接口可以直接支持这三种，前端传什么后端跑什么。
-
----
-
-## 九、切换 preset 的开销
-
-**不需要重调 eBay，也不需要新建 MatchSearch 记录。**
-
-原因：optimizer 是纯函数——candidate 原始数据（从 eBay 抓来的 seller / condition / country 等）已经存在 `MatchSearch.rawResponse` 里。切换 preset 只是用不同参数**重新跑一次 optimizer**，同一份候选数据换视角。
-
-```
-[eBay API] → matcher → 拿到候选原始数据
-                        ↓
-                  MatchSearch.rawResponse (JSON, 已存)
-                        ↓
-                  Candidate 表 (每条 + label + optimizer 结果)
-                        ↓
-              [切换 preset] 从 rawResponse 拿原始数据
-                        ↓
-                  重跑 optimizer, 得到新的 rank / filtered
-                        ↓
-              [不落库] 直接返回给前端展示
-
+landed       = price + shipping_cost                          # 到手总价
+anchor       = 次低landed   若 最低landed < 0.6 × 次低landed     # 离群保护
+             = 最低landed   否则
+price_score  = clamp(100 × anchor / landed, 0, 100)           # 越便宜越高,最便宜=100
 ```
 
-**为什么不落库**：同一个 PartLine 每次切 preset 都新建 MatchSearch 会污染数据；用户切 preset 是"视角切换"，不是"新搜索"。
+- 数据:80.4% 免运(landed=标价);非零运费中位 $20、p90 $160(大件 freight)
+- **缺运费处理**:5.2% 的件无 shippingOptions(freight/自提)→ 运费**按未知,不当 0**,不让它当便宜锚(否则大件假装便宜)
+- 边界:price≤0 → 0 分沉底;单候选 → 100
 
-**只有原始搜索（点 Search eBay）才写库。** 切 preset 只在返回体里用不同参数重算。
+**例子**
+
+4 个卖家(D 是大件、无 shippingOptions):
+
+| 卖家 | 标价 | 运费 | landed | price_score |
+| -- | -- | ---- | ------ | ----------- |
+| A  | 74 | 0    | 74     | 100×74÷74 = **100** |
+| B  | 60 | 20   | 80     | 100×74÷80 = **92.5** |
+| C  | 120| 0    | 120    | 100×74÷120 = **61.7** |
+| D  | 200| 缺失 | —      | **中性 50**(不当便宜锚) |
+
+最低 landed=74,次低 80,74 > 0.6×80 → 无离群,anchor=74。注意 B 标价最低($60)但含运费后并不便宜。
+
+
+### 2. speed
+
+```
+D            = delivery_days_max                              # 保守取较晚界
+speed_score  = clamp(100 × (D_slow − D) / (D_slow − D_fast), 0, 100)
+默认: D_fast = 2 天,  D_slow = 14 天
+```
+
+- 数据:91.2% 有到货预估 → 速度分成立;到货天数 中位 5 / p75 9 / p90 11 / max 74(backorder 长尾)
+- 校准:D_slow=14 → 5天=75、9天=42、11天=25、≥14天=0(长尾归零)
+- **缺失(9%)**:不急 → 中性 50;急件由第 1 层 gate 滤掉。急件可把 D_slow 压到 ~7 让排序更偏快
+
+**例子(D_fast=2, D_slow=14)**
+
+| 卖家 | 到货天数 | speed_score |
+| -- | ---- | ----------- |
+| A  | 4 天  | (14−4)÷12 = **83** |
+| B  | 6 天  | (14−6)÷12 = **67** |
+| C  | 11 天 | (14−11)÷12 = **25** |
+| D  | 无预估 | **中性 50**(急件则被 gate 滤掉) |
+
+
+### 3. quality
+
+```
+quality_score = 0.50·seller + 0.25·condition + 0.15·assurance + 0.10·popularity
+```
+
+**① seller(50%)** — 好评率几乎无区分度(挤在 98.5–100),主区分靠 top_rated(40% 为 true)
+```
+seller = 60
+       + (好评率 ≥99.5 → +20;  99–99.5 → +10;  98–99 → 0;  <98 → −30)
+       + (top_rated → +20)
+       clamp[0,100]
+```
+
+**② condition(25%)** — 按 conditionId 映射(见上表)。数据:New 76.6% / Used 20.1%
+
+**③ assurance(15%)**
+```
+warranty: Lifetime→100 / ≥3yr→80 / ≥1yr→60 / <1yr→40 / 明确无→30 / 缺失·无法解析→50   占 0.6
+returns:  ≥30天→100 / 接受但窗口未知→60 / 不接受→0 / 缺失→50                          占 0.4
+assurance = 0.6×warranty + 0.4×returns
+```
+- 数据:约 51% 的件能解析出保修年限;多为 1–3 年
+
+**④ popularity(10%)** — sold_qty 中位=0,故 0 当"未知"不当"最差"
+```
+sold_qty = 0  → 50(未知/冷门,中性)
+sold_qty > 0  → 从 50 对数上升到 100,约 50 件封顶
+```
+- 数据:半数件 sold_qty=0,长尾 p90=39 / p95=105 → 饱和阈值 ~50
+
+**缺任一子信号 → 该子分给中性 50。**
+
+**例子**
+
+| | seller | condition | assurance | popularity | **质量分** |
+|--|--|--|--|--|--|
+| **X**:99.8%·TopRated·New·3年保修+30天退货·售300 | 100 | 100 | 88 | 100 | **98** |
+| **Y**:99.0%·非Top·Used·无保修·退货窗口未知·售0 | 70 | 75 | 54 | 50 | **67** |
+
+- **X** 算式:0.50×100 + 0.25×100 + 0.15×88 + 0.10×100 = **98.2**
+- **Y** 算式:0.50×70 + 0.25×75 + 0.15×54 + 0.10×50 = **66.8**
+- 子分拆解看得出:X 的 seller 满分(top_rated 顶上去),Y 是二手中端卖家但**没被打死**(67 分),符合"Used 可接受不淘汰"的设计
+```
+
