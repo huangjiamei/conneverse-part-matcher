@@ -1,135 +1,97 @@
-```markdown
-# Conneverse Optimizer New
+# Conneverse Optimizer V2 — 设计定稿
 
-> 针对**单零件推荐**范围。打分标准固定客观,用户只通过第 1 层(硬约束)和第 3 层(权重)影响结果。
+> 单零件推荐。打分标准固定客观,用户只通过第 1 层(硬约束)和第 3 层(权重)影响结果。
+> 常数按 7,809 个真实 eBay item 校准(2026-07)。
 
-## 一、算法三层结构
+---
+
+## 一、字段清单(现有的 key + 用在哪)
+
+`Candidate` 上所有字段,以及每个字段在 V2 里的去向。图例:✅ 已用 / ⬜ 有数据但没用 / 💤 拿不到(恒空)。
+
+| 字段 | 数据 | 用在哪 |
+| ---- | ---- | ---- |
+| `item_id` | ✅ | 标识,不打分 |
+| `title` | ✅ | 标识,不打分 |
+| `price` | ✅ 100% | **价格分**(landed) |
+| `shipping_cost` | ✅ 94.8% | **价格分**(landed;缺失=None,不当免运) |
+| `condition_id` | ✅ ~100% | **第1层**(7000排除 / require_new / allow_used) + **质量分·件况** |
+| `condition`(字符串) | ✅ | 兼容保留;打分统一用 `condition_id` |
+| `availability_status` | ✅ | **第1层**(在库门槛) |
+| `available_qty` | ⬜ 79.8% | 未用(可留"仅剩 X 件"提示) |
+| `sold_qty` | ✅ 100% | **质量分·热度** |
+| `seller_feedback_pct` | ✅ ~100% | **第1层**(卖家好评率,最低线) + **质量分·seller** |
+| `seller_feedback_count` | ✅ ~100% | **第1层**(卖家累计评价数,最低线);不进打分 |
+| `top_rated` | ✅ 40% true | **质量分·seller**(主区分信号) |
+| `delivery_days_max` | ✅ 91.2% | **第1层**(Rush 截止) + **速度分** |
+| `delivery_days_min` | ⬜ | 未用(速度分只取 max) |
+| `returns_accepted` | ✅ | **质量分·保障** |
+| `return_period_days` | ✅ | **质量分·保障** |
+| `warranty_years` | ✅ ~51% 可解析 | **质量分·保障** |
+| `country` | ✅ | **第1层**(仅美国,Premium 启用) |
+| `brand` | ⬜ | park(字段混杂:Unbranded/车厂名/店名混在一起,不可用) |
+| `product_rating` | 💤 | 预留,恒 None |
+| `product_review_count` | 💤 | 预留,恒 None |
+| `fitment_complaint_rate` | 💤 | 预留,需爬评论+NLP |
+| `fitment_review_sample` | 💤 | 预留,恒 None |
+| `review_recency` | 💤 | 预留,恒 None |
+| `is_self_hosted_rating` | 💤 | 预留,恒 False |
+| `raw` | ✅ | 调试兜底 |
+
+- `top_rated` 的 **40% true** 是取值分布(该字段人人都有),不是填充率。
+- `warranty_years` 的 **~51% 可解析**:62.9% 有 warranty 字段,但含 "Yes/None/Other" 等非数字,真正能解析出年限的约 51%。
+- 其余百分比都指**填充率**(有值的 item 占比)。
+
+**打分实际用到的 10 个字段**:price、shipping_cost、condition_id、sold_qty、seller_feedback_pct、top_rated、delivery_days_max、warranty_years、returns_accepted、return_period_days。
+
+---
+
+## 二、三层结构
 
 ```
 第 1 层  硬门槛 / 开关 (0/1)   →  候选 进 / 不进
-第 2 层  系统打分 (0–100)      →  每个大分客观打分(标准固定,不随用户变)
-第 3 层  用户权重 (百分比)      →  各大分占多少,加权出总排名
+第 2 层  系统打分 (0–100)      →  price / speed / quality 三个大分(标准固定)
+第 3 层  用户权重 (百分比)      →  三个大分加权,排序
 ```
 
-- **快捷入口**:提供多个presets(= 第 1 层开关 + 第 3 层权重 的打包)
-- **高级入口**:用户自由组合第 1 层开关 + 第 3 层权重(先支持"一次性覆盖")
-- 两个入口都跑同一套第 2 层打分
-
-
-### 第 1 层 · 硬门槛 / 开关(决定"进不进")
-
-| key                     | 作用                                       | 类型          |
-| ----------------------- | ---------------------------------------- | ----------- |
-| `availability_status`   | 能不能等 backorder(在库开关)                     | 用户开关(默认在库)  |
-| `condition`             | 要不要只收新件(require_new)                     | 用户开关(默认只新件) |
-| `seller_feedback_pct`   | 通用最低信誉线                                  | 固定门槛        |
-| `seller_feedback_count` | 通用最低评价数线                                 | 固定门槛        |
-| `delivery_days_min/max` | "X 天内必须到"硬截止;急件下没有到货预估的也一并过滤(设了才启用) | 可选门槛        |
-| `country`               | "仅美国货"合规要求                               | 可选开关(默认关)   |
-
-
-### 第 2 层 · 打分(每个大分 0–100)
-
-| 大分      | key                                                                                                                                       |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **价格分** | `price`、`shipping_cost`                                                                                                                   |
-| **速度分** | `delivery_days_min`、`delivery_days_max`                                                                                                   |
-| **质量分** | `seller_feedback_pct`、`seller_feedback_count`、`top_rated`、`warranty_years`、`returns_accepted`、`return_period_days`、`condition`、`sold_qty` |
-
-
-### 第 3 层 · 权重(不消费候选字段)
-
-| 参数               | 说明    |
-| ---------------- | ----- |
-| `weight_price`   | 价格分占比 |
-| `weight_speed`   | 速度分占比 |
-| `weight_quality` | 质量分占比 |
-
+- **快捷入口**:选 preset(= 第 1 层开关 + 第 3 层权重 的打包)
+- **高级入口**:自由组合第 1 层开关 + 第 3 层权重
 
 ---
 
-## 二、算法数据说明
-
-### 1. 跨层的 key(既在第 1 层又在第 2 层)
-
-先卡下限、线上再比高低,不是重复:
-
-- `condition` → 第 1 层(可选 require_new)+ 第 2 层(件况分,New / New other / Used 递减扣分)
-- `seller_feedback_pct` / `seller_feedback_count` → 第 1 层(最低线)+ 第 2 层(信誉分)
-- `delivery_days_min/max` → 第 1 层(硬截止,可选)+ 第 2 层(速度分)
-
-### 2. 不参与三层的 2 个字段
-
-- `available_qty` → 可选"仅剩 X 件"提示,先不用(单件采购下无打分意义)
-- `brand` → (现在brand有的存储的是店铺名称)
-
-### 3. 预留口子(旧算法考虑过、现在 eBay 拿不到的打分数据)
-
-| key                      | 原打算衡量        | 现状                    |
-| ------------------------ | ------------ | --------------------- |
-| `product_rating`         | 产品星级(0–5)     | 恒 None,eBay 只给卖家级信誉   |
-| `product_review_count`   | 产品评价数        | 恒 None                |
-| `fitment_complaint_rate` | 装车抱怨率(0–1)    | 恒 None,需爬评论 + NLP     |
-| `fitment_review_sample`  | 抱怨率样本量       | 恒 None                |
-| `review_recency`         | 评论时效性(0–100) | 恒 None                |
-| `is_self_hosted_rating`  | 是否卖家自站评论     | 恒 False,eBay 全平台评论    |
-
-
----
-
-
-## 三、打分算法
-
-> 常数均按 7,809 个真实 eBay item 校准(2026-07)。每个大分 0–100,标准固定,不随 preset 变。
+## 三、第 2 层 · 打分算法【已定稿】
 
 ### 1. price
 
 ```
-landed       = price + shipping_cost                          # 到手总价
-anchor       = 次低landed   若 最低landed < 0.6 × 次低landed     # 离群保护
-             = 最低landed   否则
-price_score  = clamp(100 × anchor / landed, 0, 100)           # 越便宜越高,最便宜=100
+landed       = price + shipping_cost
+anchor       = 次低landed  若 最低landed < 0.6 × 次低landed  否则 最低landed   (离群保护)
+price_score  = clamp(100 × anchor / landed, 0, 100)
 ```
 
-- 数据:80.4% 免运(landed=标价);非零运费中位 $20、p90 $160(大件 freight)
-- **缺运费处理**:5.2% 的件无 shippingOptions(freight/自提)→ 运费**按未知,不当 0**,不让它当便宜锚(否则大件假装便宜)
-- 边界:price≤0 → 0 分沉底;单候选 → 100
-
-**例子**
-
-4 个卖家(D 是大件、无 shippingOptions):
+- 缺运费(5.2%,大件 freight)→ landed=None → 中性 50,不当锚
+- price≤0 → 0;单候选 → 100
 
 | 卖家 | 标价 | 运费 | landed | price_score |
-| -- | -- | ---- | ------ | ----------- |
-| A  | 74 | 0    | 74     | 100×74÷74 = **100** |
-| B  | 60 | 20   | 80     | 100×74÷80 = **92.5** |
-| C  | 120| 0    | 120    | 100×74÷120 = **61.7** |
-| D  | 200| 缺失 | —      | **中性 50**(不当便宜锚) |
-
-最低 landed=74,次低 80,74 > 0.6×80 → 无离群,anchor=74。注意 B 标价最低($60)但含运费后并不便宜。
-
+| -- | -- | -- | -- | -- |
+| A | 74 | 0 | 74 | 100 |
+| B | 60 | 20 | 80 | 92.5 |
+| C | 120 | 0 | 120 | 61.7 |
+| D | 200 | 缺失 | — | 中性 50 |
 
 ### 2. speed
 
 ```
-D            = delivery_days_max                              # 保守取较晚界
+D            = delivery_days_max
 speed_score  = clamp(100 × (D_slow − D) / (D_slow − D_fast), 0, 100)
-默认: D_fast = 2 天,  D_slow = 14 天
+默认 D_fast=2, D_slow=14
 ```
 
-- 数据:91.2% 有到货预估 → 速度分成立;到货天数 中位 5 / p75 9 / p90 11 / max 74(backorder 长尾)
-- 校准:D_slow=14 → 5天=75、9天=42、11天=25、≥14天=0(长尾归零)
-- **缺失(9%)**:不急 → 中性 50;急件由第 1 层 gate 滤掉。急件可把 D_slow 压到 ~7 让排序更偏快
+- 缺失(9%)→ 中性 50;急件由第 1 层 gate 滤掉
 
-**例子(D_fast=2, D_slow=14)**
-
-| 卖家 | 到货天数 | speed_score |
-| -- | ---- | ----------- |
-| A  | 4 天  | (14−4)÷12 = **83** |
-| B  | 6 天  | (14−6)÷12 = **67** |
-| C  | 11 天 | (14−11)÷12 = **25** |
-| D  | 无预估 | **中性 50**(急件则被 gate 滤掉) |
-
+| 到货天数 | 4 | 6 | 11 | 无预估 |
+| -- | -- | -- | -- | -- |
+| speed_score | 83 | 67 | 25 | 中性 50 |
 
 ### 3. quality
 
@@ -137,42 +99,88 @@ speed_score  = clamp(100 × (D_slow − D) / (D_slow − D_fast), 0, 100)
 quality_score = 0.50·seller + 0.25·condition + 0.15·assurance + 0.10·popularity
 ```
 
-**① seller(50%)** — 好评率几乎无区分度(挤在 98.5–100),主区分靠 top_rated(40% 为 true)
+**① seller(50%)** — 好评率挤在 98.5–100,主区分靠 top_rated
+
 ```
-seller = 60
-       + (好评率 ≥99.5 → +20;  99–99.5 → +10;  98–99 → 0;  <98 → −30)
-       + (top_rated → +20)
-       clamp[0,100]
+seller = 60 + (好评率 ≥99.5→+20; 99–99.5→+10; 98–99→0; <98→−30) + (top_rated→+20)
 ```
 
-**② condition(25%)** — 按 conditionId 映射(见上表)。数据:New 76.6% / Used 20.1%
+**② condition(25%)** — 按 conditionId
+
+| conditionId | 桶 | 分 |
+| -- | -- | -- |
+| 1000 | New | 100 |
+| 1500 | New other | 90 |
+| 2000–2999 | Reman/Refurb/Like New | 82 |
+| 3000–5999 | Used | 75 |
+| 6000 | Acceptable | 60 |
+| None | Unknown | 50 |
+| 7000 For parts | 第1层排除 | — |
 
 **③ assurance(15%)**
-```
-warranty: Lifetime→100 / ≥3yr→80 / ≥1yr→60 / <1yr→40 / 明确无→30 / 缺失·无法解析→50   占 0.6
-returns:  ≥30天→100 / 接受但窗口未知→60 / 不接受→0 / 缺失→50                          占 0.4
-assurance = 0.6×warranty + 0.4×returns
-```
-- 数据:约 51% 的件能解析出保修年限;多为 1–3 年
 
-**④ popularity(10%)** — sold_qty 中位=0,故 0 当"未知"不当"最差"
 ```
-sold_qty = 0  → 50(未知/冷门,中性)
-sold_qty > 0  → 从 50 对数上升到 100,约 50 件封顶
+warranty: Lifetime→100 / ≥3yr→80 / ≥1yr→60 / <1yr→40 / 明确无→30 / 缺失→50   × 0.6
+returns:  ≥30天→100 / 接受(窗口未知)→60 / 否→0 / 缺失→50                       × 0.4
 ```
-- 数据:半数件 sold_qty=0,长尾 p90=39 / p95=105 → 饱和阈值 ~50
+
+**④ popularity(10%)** — sold_qty 中位=0,故 0 当"未知"
+
+```
+sold_qty=0 → 50;  >0 → 50 + 50 × log10(1+sold)/log10(1+50),封顶 100
+```
 
 **缺任一子信号 → 该子分给中性 50。**
 
-**例子**
+| | seller | condition | assurance | popularity | 质量分 |
+| -- | -- | -- | -- | -- | -- |
+| X:99.8%·Top·New·3yr+30天退货·售300 | 100 | 100 | 88 | 100 | 98 |
+| Y:99.0%·非Top·Used·无保修·退货窗口未知·售0 | 70 | 75 | 54 | 50 | 67 |
 
-| | seller | condition | assurance | popularity | **质量分** |
-|--|--|--|--|--|--|
-| **X**:99.8%·TopRated·New·3年保修+30天退货·售300 | 100 | 100 | 88 | 100 | **98** |
-| **Y**:99.0%·非Top·Used·无保修·退货窗口未知·售0 | 70 | 75 | 54 | 50 | **67** |
+---
 
-- **X** 算式:0.50×100 + 0.25×100 + 0.15×88 + 0.10×100 = **98.2**
-- **Y** 算式:0.50×70 + 0.25×75 + 0.15×54 + 0.10×50 = **66.8**
-- 子分拆解看得出:X 的 seller 满分(top_rated 顶上去),Y 是二手中端卖家但**没被打死**(67 分),符合"Used 可接受不淘汰"的设计
-```
+## 四、第 1 层 · gate【草案,待锁】
 
+| gate | 用的 key | 类型 |
+| -- | -- | -- |
+| For parts 排除 | condition_id==7000 | 固定,不可关 |
+| 卖家最低线 | seller_feedback_pct / count | 固定(**好评率≥98% 且 评价数≥100**) |
+| 在库门槛 | availability_status | preset 拨 |
+| 只收新件 | condition_id (require_new) | preset 拨 |
+| 允许二手 | condition_id (allow_used) | preset 拨 |
+| 到货硬截止 | delivery_days_max | preset 拨(仅 Rush) |
+| 仅美国货 | country | preset 拨(**仅 Premium**) |
+| fitment | — | 休眠(无数据) |
+
+**卖家最低线校准(v4 数据)**:仅作安全底线(挡近乎零记录的新号),不偏好大卖家。
+- 评价数 <100 切底部 **4.6%**(旧值 50 只切 3.2%,太松;500 切 11.7%,太狠)
+- 好评率 <98 切底部约 **5%**(旧值 95% 几乎切不到人)
+
+---
+
+## 五、第 3 层 · preset【草案,待锁】
+
+| Preset | 场景 | gate | 权重 price/speed/quality |
+| -- | -- | -- | -- |
+| Rush 急件 | 今明两天必须到 | in_stock, max_delivery=3天 | 15 / 60 / 25 |
+| Balanced 均衡(默认) | 常规采购 | in_stock | 35 / 30 / 35 |
+| Budget 省钱 | 不急越便宜越好 | 允许 backorder + 允许二手 | 60 / 10 / 30 |
+| Premium 优质 | 高端/严苛保险 | in_stock, require_new, **仅美国** | 15 / 25 / 60 |
+
+**待确认**:Premium 的卖家门槛要不要单独抬高(比通用底线 98%/100 更严)。
+
+---
+
+## 六、数据校准记录(7,809 item)
+
+| 字段 | 填充率 | 关键分布 |
+| -- | -- | -- |
+| price | 100% | 中位 $74,p90 $310 |
+| shipping_cost | 94.8% | 免运 80.4%,非零中位 $20 |
+| delivery_days_max | 91.2% | 天数中位 5 / p75 9 / p90 11 |
+| sold_qty | 100% | 中位 0,p90 39,p95 105 |
+| seller_feedback_pct | ~100% | 挤在 98.5–100(p5=98.6) |
+| seller_feedback_count | ~100% | p5=116 / p10=397 / p25=1,816 / 中位=10,179 / p75=57,961;<50=3.2% <100=4.6% <500=11.7% |
+| top_rated | — | 40% true |
+| condition | ~100% | New 77% / Used 20% / New other 2% |
+| warranty_years | 62.9%(可解析 ~51%) | 多为 1–3 年 |
