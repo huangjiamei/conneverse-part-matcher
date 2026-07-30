@@ -23,8 +23,13 @@ class Candidate:
 
     # ---------- 核心经济字段 (eBay 100% 填充) ----------
     price: float = 0.0                  # 单价, USD
-    shipping_cost: float = 0.0          # 运费, 0 = 免运费
-    condition: str = "New"              # "New" / "Used" / "New other (see details)"
+    # 运费: 0.0 = 明确免运费; None = 拿不到 (5.2%, 多为大件 freight)。
+    # 两者不能混: 缺失当免运会把 landed 算低, 让大件假装最便宜。
+    shipping_cost: Optional[float] = None
+    condition: str = "New"              # 兼容保留; 打分/gate 统一用 condition_id
+    # eBay conditionId: 1000 New / 1500 New other / 2000-2999 Reman/Refurb /
+    # 3000-5999 Used / 6000 Acceptable / 7000 For parts。None = 拿不到。
+    condition_id: Optional[int] = None
 
     # ---------- 库存 ----------
     availability_status: str = "IN_STOCK"  # IN_STOCK / OUT_OF_STOCK
@@ -39,7 +44,9 @@ class Candidate:
     # ---------- 交付/保障 ----------
     delivery_days_min: Optional[int] = None  # 到"今天"的最短天数
     delivery_days_max: Optional[int] = None
-    returns_accepted: bool = False
+    # 三态: True 接受 / False 明确不接受 / None 拿不到。
+    # 缺失和"不接受"必须分开: 前者质量分给中性 50, 后者给 0。
+    returns_accepted: Optional[bool] = None
     return_period_days: Optional[int] = None
     warranty_years: Optional[float] = None    # 从 aspect 归一化, 详见 adapter
 

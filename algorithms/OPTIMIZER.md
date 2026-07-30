@@ -1,7 +1,7 @@
-# Conneverse Optimizer V2 — 设计定稿
+# Conneverse Optimizer — 设计定稿(V2)
 
 > 单零件推荐。打分标准固定客观,用户只通过第 1 层(硬约束)和第 3 层(权重)影响结果。
-> 常数按 7,809 个真实 eBay item 校准(2026-07)。三层全部已锁,可进落地。
+> 常数按 7,809 个真实 eBay item 校准(2026-07)。三层全部已锁,已落地并端到端验证。
 
 ---
 
@@ -23,9 +23,9 @@
 | `seller_feedback_pct` | ✅ ~100% | **第1层**(卖家好评率,最低线) + **质量分·seller** |
 | `seller_feedback_count` | ✅ ~100% | **第1层**(卖家累计评价数,最低线);不进打分 |
 | `top_rated` | ✅ 40% true | **质量分·seller**(主区分信号) |
-| `delivery_days_max` | ✅ 91.2% | **第1层**(Rush 截止) + **速度分** |
+| `delivery_days_max` | ✅ 91.2% | **第1层**(可选到货截止开关) + **速度分** |
 | `delivery_days_min` | ⬜ | 未用(速度分只取 max) |
-| `returns_accepted` | ✅ | **质量分·保障** |
+| `returns_accepted` | ✅ | **质量分·保障**(Optional[bool],缺失→中性) |
 | `return_period_days` | ✅ | **质量分·保障** |
 | `warranty_years` | ✅ ~51% 可解析 | **质量分·保障** |
 | `country` | ✅ | **第1层**(独立合规开关"仅美国",不绑 preset,默认关) |
@@ -54,9 +54,9 @@
 第 3 层  用户权重 (百分比)      →  三个大分加权,排序
 ```
 
-- **快捷入口**:选 preset(= 第 1 层开关 + 第 3 层权重 的打包)
+- **快捷入口**:选 preset(= 第 1 层开关 + 第 3 层权重 的打包);**默认 preset = Balanced**
 - **高级入口**:自由组合第 1 层开关 + 第 3 层权重
-- **独立合规开关**:"仅美国"不属于任何 preset,谁有合规要求谁单独勾(默认关)
+- **独立合规/约束开关**:"仅美国"、"X 天内必须到"都不属于任何 preset,谁需要谁单独开(默认关)
 
 ---
 
@@ -66,11 +66,12 @@
 
 ```
 landed       = price + shipping_cost
-anchor       = 次低landed  若 最低landed < 0.6 × 次低landed  否则 最低landed   (离群保护)
+anchor       = 次低landed  若 (有价候选≥3 且 最低landed < 0.6 × 次低landed)  否则 最低landed
 price_score  = clamp(100 × anchor / landed, 0, 100)
 ```
 
 - 缺运费(5.2%,大件 freight)→ landed=None → 中性 50,不当锚
+- **离群保护需 ≥3 个有价候选**(2 条没有参照群,统计上不成立 → 直接取最低)
 - price≤0 → 0;单候选 → 100
 
 | 卖家 | 标价 | 运费 | landed | price_score |
@@ -88,7 +89,8 @@ speed_score  = clamp(100 × (D_slow − D) / (D_slow − D_fast), 0, 100)
 默认 D_fast=2, D_slow=14
 ```
 
-- 缺失(9%)→ 中性 50;急件由第 1 层 gate 滤掉
+- 缺失(9%)→ 中性 50
+- 速度是"软偏好",靠权重体现(Rush 权重 60);"必须 X 天到"是独立可选硬截止开关,不写进 preset
 
 | 到货天数 | 4 | 6 | 11 | 无预估 |
 | -- | -- | -- | -- | -- |
@@ -121,8 +123,8 @@ seller = 60 + (好评率 ≥99.5→+20; 99–99.5→+10; 98–99→0; <98→−3
 **③ assurance(15%)**
 
 ```
-warranty: Lifetime→100 / ≥3yr→80 / ≥1yr→60 / <1yr→40 / 明确无→30 / 缺失→50   × 0.6
-returns:  ≥30天→100 / 接受(窗口未知)→60 / 否→0 / 缺失→50                       × 0.4
+warranty: Lifetime→100 / ≥3yr→80 / ≥1yr→60 / <1yr→40 / 明确无(None)→30 / 缺失→50   × 0.6
+returns:  ≥30天→100 / 接受(窗口未知)→60 / 否→0 / 缺失→50                             × 0.4
 ```
 
 **④ popularity(10%)** — sold_qty 中位=0,故 0 当"未知"
@@ -147,17 +149,19 @@ sold_qty=0 → 50;  >0 → 50 + 50 × log10(1+sold)/log10(1+50),封顶 100
 | For parts 排除 | condition_id==7000 | 固定,不可关 |
 | 卖家最低线 | seller_feedback_pct / count | 固定(**好评率≥98% 且 评价数≥100**) |
 | 在库门槛 | availability_status | preset 拨 |
-| 只收新件 | condition_id (require_new) | preset 拨 |
-| 允许二手 | condition_id (allow_used) | preset 拨 |
-| 到货硬截止 | delivery_days_max | preset 拨(仅 Rush) |
-| 仅美国货 | country | **独立合规开关,不绑 preset,默认关** |
+| 只收新件(硬排除非新) | condition_id (require_new) | **仅 Premium** |
+| 允许二手 | condition_id (allow_used) | **默认开**(非 Premium 都开;二手靠件况分降权) |
+| 到货硬截止 | delivery_days_max | 独立可选开关(有死线才开),默认关 |
+| 仅美国货 | country | 独立合规开关,不绑 preset,默认关 |
 | fitment | — | 休眠(无数据) |
 
-**卖家最低线校准(v4 数据)**:仅作安全底线(挡近乎零记录的新号),不偏好大卖家。所有 preset 统一 98% / 100,Premium 不单独抬(靠质量分权重区分)。
+**件况处理原则**:"偏新"是软偏好,由件况分(New=100 > Used=75)自动降权,**不硬排除二手**——否则二手主导的品类(老车件、翼子板等)默认档会返回空。**只有 Premium** 用 `require_new` 硬排除非新件。`For parts (7000)` 永远硬排除(装不了)。
+
+**卖家最低线校准(v4 数据)**:仅作安全底线(挡近乎零记录的新号),不偏好大卖家。所有 preset 统一 98% / 100。
 - 评价数 <100 切底部 **4.6%**(旧值 50 只切 3.2%,太松;500 切 11.7%,太狠)
 - 好评率 <98 切底部约 **5%**(旧值 95% 几乎切不到人)
 
-**仅美国**:是发货地约束,不是质量,故不绑进任何 preset;有合规要求时用户独立开。
+**两个独立开关**(仅美国 / X天硬截止):都是约束而非偏好,不写死进任何 preset,用户按需叠加。
 
 ---
 
@@ -165,14 +169,16 @@ sold_qty=0 → 50;  >0 → 50 + 50 × log10(1+sold)/log10(1+50),封顶 100
 
 | Preset | 场景 | gate | 权重 price/speed/quality |
 | -- | -- | -- | -- |
-| Rush 急件 | 今明两天必须到 | in_stock, max_delivery=3天 | 15 / 60 / 25 |
-| Balanced 均衡(默认) | 常规采购 | in_stock | 35 / 30 / 35 |
+| Rush 急件 | 要快,优先最快到货 | in_stock, 允许二手 | 15 / 60 / 25 |
+| **Balanced 均衡(默认)** | 常规采购 | in_stock, 允许二手 | 35 / 30 / 35 |
 | Budget 省钱 | 不急越便宜越好 | 允许 backorder + 允许二手 | 60 / 10 / 30 |
-| Premium 优质 | 高端/严苛保险 | in_stock, require_new | 15 / 25 / 60 |
+| Premium 优质 | 高端/严苛保险 | in_stock, **require_new(唯一硬排除非新)** | 15 / 25 / 60 |
 
-- 所有 preset 共享固定门槛:For parts 排除、卖家最低线 98%/100
-- "仅美国"是独立合规开关,任何 preset 都可叠加,不写死在某个 preset 里
-- 权重为初始值,上线后可按反馈调(纯常数)
+- **默认 preset = Balanced**(前端不选时用它)
+- **allow_used 默认开**:除 Premium 外都允许二手,新件靠件况分自然排前,保证默认档不会因二手落空
+- 共享固定门槛:For parts 排除、卖家最低线 98%/100
+- "仅美国"、"X天硬截止"是独立开关,任何 preset 都可叠加,不写死在 preset 里
+- 权重为初始值,上线后可调
 
 ---
 
@@ -182,10 +188,20 @@ sold_qty=0 → 50;  >0 → 50 + 50 × log10(1+sold)/log10(1+50),封顶 100
 | -- | -- | -- |
 | price | 100% | 中位 $74,p90 $310 |
 | shipping_cost | 94.8% | 免运 80.4%,非零中位 $20 |
-| delivery_days_max | 91.2% | 天数中位 5 / p75 9 / p90 11 |
+| delivery_days_max | 91.2% | 天数中位 5 / p75 9 / p90 11(只有 4.1% ≤3 天) |
 | sold_qty | 100% | 中位 0,p90 39,p95 105 |
 | seller_feedback_pct | ~100% | 挤在 98.5–100(p5=98.6) |
 | seller_feedback_count | ~100% | p5=116 / p10=397 / p25=1,816 / 中位=10,179 / p75=57,961;<50=3.2% <100=4.6% <500=11.7% |
-| top_rated | — | 40% true |
+| top_rated | — | 40% true(实测 39.4%) |
 | condition | ~100% | New 77% / Used 20% / New other 2% |
 | warranty_years | 62.9%(可解析 ~51%) | 多为 1–3 年 |
+
+---
+
+## 七、落地状态
+
+- 代码:`algorithms/optimizer/`(candidate / ebay_adapter / matcher_adapter / gates / scoring / presets / optimizer)全部按本文档实现
+- 测试:`test_optimizer_v2.py` 130 项全过;`test_category_routing.py` 全过
+- 端到端:四档在热门/冷门/大件freight/二手主导品类上行为均符合预期
+- 兼容:老 preset 名保留别名;`optimize()` 老签名退化;demo `VALID_PRESETS` 收 8 名
+- 破坏性变更:`min_eligible_price` 语义变为 landed_anchor(已确认无下游依赖)

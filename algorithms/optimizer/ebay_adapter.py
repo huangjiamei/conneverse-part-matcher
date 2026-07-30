@@ -22,6 +22,25 @@ def _to_float(v: Any) -> float:
         return 0.0
 
 
+def _to_optional_float(v: Any) -> Optional[float]:
+    """跟 _to_float 的区别: 拿不到就是 None, 不假装 0。运费专用。"""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_optional_int(v: Any) -> Optional[int]:
+    if v is None or v == "" or isinstance(v, bool):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _find_aspect(raw: dict, name: str) -> Optional[str]:
     """从 localizedAspects 里找指定 name 的 value."""
     for a in (raw.get("localizedAspects") or []):
@@ -98,13 +117,15 @@ def build_candidate_from_ebay(raw: dict, now: Optional[datetime] = None) -> Cand
     price = _to_float(raw.get("price", {}).get("value"))
 
     # ---- 运费 ----
-    shipping_cost = 0.0
+    # 没有 shippingOptions (大件 freight / 到付) → None, 不是 0。
+    shipping_cost: Optional[float] = None
     shipping_opts = raw.get("shippingOptions") or []
     if shipping_opts:
-        shipping_cost = _to_float(shipping_opts[0].get("shippingCost", {}).get("value"))
+        shipping_cost = _to_optional_float((shipping_opts[0].get("shippingCost") or {}).get("value"))
 
     # ---- Condition ----
     condition = raw.get("condition") or ""
+    condition_id = _to_optional_int(raw.get("conditionId"))
 
     # ---- 库存 ----
     avail_status = "IN_STOCK"
@@ -142,8 +163,10 @@ def build_candidate_from_ebay(raw: dict, now: Optional[datetime] = None) -> Cand
         delivery_max = _days_from_now(_parse_iso_dt(so.get("maxEstimatedDeliveryDate")), now)
 
     # ---- Returns ----
+    # 没有 returnTerms / 没有 returnsAccepted 字段 → None (不当成"不接受退货")
     returns = raw.get("returnTerms") or {}
-    returns_accepted = bool(returns.get("returnsAccepted"))
+    raw_returns_accepted = returns.get("returnsAccepted")
+    returns_accepted = None if raw_returns_accepted is None else bool(raw_returns_accepted)
     return_period_days = None
     rp = returns.get("returnPeriod") or {}
     if rp.get("value") is not None and rp.get("unit") == "CALENDAR_DAY":
@@ -166,6 +189,7 @@ def build_candidate_from_ebay(raw: dict, now: Optional[datetime] = None) -> Cand
         price=price,
         shipping_cost=shipping_cost,
         condition=condition,
+        condition_id=condition_id,
         availability_status=avail_status,
         available_qty=available_qty,
         sold_qty=sold_qty,

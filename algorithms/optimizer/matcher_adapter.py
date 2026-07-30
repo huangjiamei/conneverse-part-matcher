@@ -36,6 +36,49 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
+def _to_optional_float(v: Any) -> Optional[float]:
+    """跟 _to_float 的区别: 拿不到就是 None, 不假装 0。运费专用。"""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# eBay condition 字符串 -> conditionId。
+# matcher 的 optimizer_fields 目前不带 conditionId, 只有 condition 字符串,
+# 所以这里反推。想拿准确值, 需要在 pipeline 的 optimizer_fields 里加
+# "condition_id": detail.get("conditionId") —— 那是 matcher 侧改动, 本次没做。
+_CONDITION_NAME_TO_ID = {
+    "new": 1000,
+    "brand new": 1000,
+    "new other": 1500,
+    "new other (see details)": 1500,
+    "new with defects": 1750,
+    "certified - refurbished": 2000,
+    "certified refurbished": 2000,
+    "excellent - refurbished": 2010,
+    "very good - refurbished": 2020,
+    "good - refurbished": 2030,
+    "remanufactured": 2500,
+    "seller refurbished": 2500,
+    "like new": 2750,
+    "open box": 1500,
+    "used": 3000,
+    "very good": 4000,
+    "good": 5000,
+    "acceptable": 6000,
+    "for parts or not working": 7000,
+}
+
+
+def _condition_id_from_name(condition: str) -> Optional[int]:
+    """按 condition 字符串反推 conditionId。认不出来返回 None (gate 侧按缺信号放行)。"""
+    key = re.sub(r"\s+", " ", str(condition or "")).strip().lower()
+    return _CONDITION_NAME_TO_ID.get(key)
+
+
 def _parse_warranty_years(v: Optional[str]) -> Optional[float]:
     """
     Warranty aspect 值多样: "1 Year", "2 Years", "Lifetime", "60 Day", "Yes", "None"...
@@ -106,6 +149,11 @@ def build_candidate_from_matcher(
     title = candidate_info.get("title") or ""
     condition = candidate_info.get("condition") or ""
     price = _to_float((candidate_info.get("price") or {}).get("value"))
+    # 优先用 optimizer_fields 里的 condition_id (pipeline 以后加上就自动生效),
+    # 拿不到再按 condition 字符串反推。
+    condition_id = _to_int((candidate_info.get("optimizer_fields") or {}).get("condition_id"))
+    if condition_id is None:
+        condition_id = _condition_id_from_name(condition)
 
     # brand 从 compatibility 里拿 (matcher 已经抽出来了)
     compat = candidate_info.get("compatibility") or {}
@@ -122,11 +170,14 @@ def build_candidate_from_matcher(
     available_qty = _to_int(opt.get("available_qty"))
     sold_qty = _to_int(opt.get("sold_qty")) or 0
 
-    shipping_cost = _to_float(opt.get("shipping_cost"))
+    # 运费缺失 = None (不当免运)。pipeline 里 shipping_cost 取不到时就是 None。
+    shipping_cost = _to_optional_float(opt.get("shipping_cost"))
     delivery_min = _days_from_now(_parse_iso_dt(opt.get("delivery_min_date")), now)
     delivery_max = _days_from_now(_parse_iso_dt(opt.get("delivery_max_date")), now)
 
-    returns_accepted = bool(opt.get("returns_accepted"))
+    # 三态: optimizer_fields 里没这个 key (老版 pipeline / eBay 没返回) → None
+    raw_returns_accepted = opt.get("returns_accepted")
+    returns_accepted = None if raw_returns_accepted is None else bool(raw_returns_accepted)
     return_period_days = _to_int(opt.get("return_period_days"))
 
     warranty_years = _parse_warranty_years(opt.get("warranty_raw"))
@@ -140,6 +191,7 @@ def build_candidate_from_matcher(
         price=price,
         shipping_cost=shipping_cost,
         condition=condition,
+        condition_id=condition_id,
         availability_status=avail_status,
         available_qty=available_qty,
         sold_qty=sold_qty,
