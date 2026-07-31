@@ -226,6 +226,7 @@ def _run_optimizer(candidates_raw: list[dict], preset_name: str) -> dict[str, An
                 "rank": e["rank"],
                 "total": round(e["total"], 2),
                 "price_score": round(e["price_score"], 2),
+                "speed_score": round(e["speed_score"], 2),
                 "quality_score": round(e["quality_score"], 2),
             }
             for e in optim_out["eligible"]
