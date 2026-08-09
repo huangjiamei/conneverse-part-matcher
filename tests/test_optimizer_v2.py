@@ -31,6 +31,7 @@ from algorithms.optimizer import (
     warranty_subscore,
 )
 from algorithms.optimizer.ebay_adapter import _parse_warranty_years
+from algorithms.optimizer.warranty import LIFETIME_MONTHS, parse_warranty
 
 FAILURES: list[str] = []
 
@@ -166,19 +167,39 @@ def test_speed() -> None:
 def test_gates() -> None:
     print("\n§四 第 1 层 gate")
     default = GatesConfig()
-    check("7000 For parts 排除", gate_check(C(condition_id=7000), default), "condition:for_parts")
-    check("7000 即使 allow_used 也排除", gate_check(C(condition_id=7000), GatesConfig(allow_used=True)), "condition:for_parts")
-    check("1000 New 放行", gate_check(C(condition_id=1000), default), None)
-    check("3000 Used 默认拒", gate_check(C(condition_id=3000), default), "condition:used:3000")
-    check("3000 Used allow_used 放行", gate_check(C(condition_id=3000), GatesConfig(allow_used=True)), None)
-    check("1500 require_new 拒", gate_check(C(condition_id=1500), GatesConfig(require_new=True)), "condition:not_new:1500")
-    check("condition_id 缺失 → 放行", gate_check(C(condition_id=None), GatesConfig(require_new=True)), None)
+    check("7000 For parts 排除 (功能性, 固定不可关)",
+          gate_check(C(condition_id=7000), default), "condition:for_parts")
+    print("  新/旧件不再进 gate: 除 7000 外任何件况都放行")
+    for cid in (1000, 1500, 1750, 2000, 2500, 3000, 4000, 5999, 6000, None):
+        check(f"condition_id={cid} 放行", gate_check(C(condition_id=cid), default), None)
+    check("GatesConfig 不再有 require_new / allow_used 字段",
+          [f for f in ("require_new", "allow_used") if hasattr(default, f)], [])
 
     check("好评率 97.9 拒", gate_check(C(seller_feedback_pct=97.9), default), "seller_feedback:97.9%")
     check("好评率 98.0 放行", gate_check(C(seller_feedback_pct=98.0), default), None)
     check("评价数 99 拒", gate_check(C(seller_feedback_count=99), default), "seller_count:99")
     check("评价数 100 放行", gate_check(C(seller_feedback_count=100), default), None)
     check("评价数 0 (缺信号) 放行", gate_check(C(seller_feedback_count=0), default), None)
+
+    print("  warranty ≥1年 (TOLERANT: 只踢能证明不达标的)")
+    check("明确无保修 → 砍", gate_check(C(warranty_none=True), default), "warranty:none")
+    check("6 个月 → 砍", gate_check(C(warranty_months=6.0), default), "warranty:6mo")
+    check("11 个月 → 砍", gate_check(C(warranty_months=11.0), default), "warranty:11mo")
+    check("12 个月 → 放行", gate_check(C(warranty_months=12.0), default), None)
+    check("36 个月 → 放行", gate_check(C(warranty_months=36.0), default), None)
+    check("Lifetime (1200) → 放行", gate_check(C(warranty_months=LIFETIME_MONTHS), default), None)
+    check("缺失 (months=None, none=False) → 放行",
+          gate_check(C(warranty_months=None, warranty_none=False), default), None)
+    check("含糊 'Yes' (years=0.5 但 months=None) → 放行",
+          gate_check(C(warranty_years=0.5, warranty_months=None), default), None)
+    check("关掉开关后不 gate", gate_check(C(warranty_none=True), GatesConfig(require_warranty=False)), None)
+
+    print("  退货政策污染: 解析后当没填, 不该被 warranty gate 砍")
+    for raw in ("30 Days Return Accepted", "See Return Policy",
+                "30-day returns accepted. Item must be original and packaged."):
+        w = parse_warranty(raw)
+        check(f"{raw[:28]!r} → months=None", w.months, None)
+        check(f"  → 不被 gate", gate_check(C(warranty_months=w.months, warranty_none=w.is_none), default), None)
 
     rush = GatesConfig(max_delivery_days=3)
     check("到货 5d 超 3d 截止", gate_check(C(delivery_days_max=5), rush), "delivery:5d>3d")
@@ -197,12 +218,12 @@ def test_gates() -> None:
 
 def test_presets() -> None:
     print("\n§五 preset 表")
+    # 四档 gate 现在完全相同 (只有 in_stock), 差别全在权重
     expected = {
-        # Rush/Balanced: 硬截止是独立开关不绑 preset; 二手放行 (只有 Premium 硬排除非新件)
-        "Rush":     ((15, 60, 25), dict(require_in_stock=True, require_new=False, allow_used=True, max_delivery_days=None)),
-        "Balanced": ((35, 30, 35), dict(require_in_stock=True, require_new=False, allow_used=True, max_delivery_days=None)),
-        "Budget":   ((60, 10, 30), dict(require_in_stock=False, require_new=False, allow_used=True, max_delivery_days=None)),
-        "Premium":  ((15, 25, 60), dict(require_in_stock=True, require_new=True, allow_used=False, max_delivery_days=None)),
+        "Rush":     ((15, 60, 25), dict(require_in_stock=True, max_delivery_days=None)),
+        "Balanced": ((35, 30, 35), dict(require_in_stock=True, max_delivery_days=None)),
+        "Budget":   ((60, 10, 30), dict(require_in_stock=True, max_delivery_days=None)),
+        "Premium":  ((15, 25, 60), dict(require_in_stock=True, max_delivery_days=None)),
     }
     for name, (weights, gates) in expected.items():
         p = get_preset(name)
@@ -214,15 +235,34 @@ def test_presets() -> None:
         check(f"{name} 不绑 US only", p.gates.require_domestic, False)
         check(f"{name} 不绑到货硬截止", p.gates.max_delivery_days, None)
 
-    print("\n  二手件在四档下的处置: 只有 Premium 硬排除")
+    print("\n  二手件: 四档全部放行 (件况只影响打分, 不进 gate)")
     used = C("used", condition_id=3000)
-    for name, want in [("Rush", None), ("Balanced", None), ("Budget", None),
-                       ("Premium", "condition:not_new:3000")]:
-        check(f"{name} 对 Used(3000)", gate_check(used, get_preset(name).gates), want)
-    print("  For parts(7000) 四档一律排除 (不受 allow_used 影响)")
+    new_other = C("newother", condition_id=1500)
+    for name in ("Rush", "Balanced", "Budget", "Premium"):
+        check(f"{name} 对 Used(3000)", gate_check(used, get_preset(name).gates), None)
+        check(f"{name} 对 New other(1500)", gate_check(new_other, get_preset(name).gates), None)
+
+    print("  For parts(7000): 四档一律排除")
     for_parts = C("junk", condition_id=7000)
     for name in ("Rush", "Balanced", "Budget", "Premium"):
         check(f"{name} 对 For parts(7000)", gate_check(for_parts, get_preset(name).gates), "condition:for_parts")
+
+    print("  warranty: 四档共享同一条门槛 (≥1年, TOLERANT)")
+    no_warranty = C("nowarranty", warranty_none=True)
+    short_warranty = C("short", warranty_months=6.0)
+    unknown_warranty = C("unknown", warranty_months=None, warranty_none=False)
+    for name in ("Rush", "Balanced", "Budget", "Premium"):
+        g = get_preset(name).gates
+        check(f"{name} require_warranty", (g.require_warranty, g.min_warranty_months), (True, 12.0))
+        check(f"{name} 对明确无保修", gate_check(no_warranty, g), "warranty:none")
+        check(f"{name} 对 6 个月", gate_check(short_warranty, g), "warranty:6mo")
+        check(f"{name} 对缺失", gate_check(unknown_warranty, g), None)
+
+    print("  backorder: 四档一律拒 (in_stock 全档打开, Budget 也不再放行)")
+    backorder = C("backorder", availability_status="OUT_OF_STOCK")
+    for name in ("Rush", "Balanced", "Budget", "Premium"):
+        check(f"{name} 对 OUT_OF_STOCK", gate_check(backorder, get_preset(name).gates), "stock:out_of_stock")
+
     print("  件况分仍然偏新 (软降权代替硬排除)")
     check("New(1000) 件况分", quality_breakdown(C(condition_id=1000))["condition"], 100.0)
     check("Used(3000) 件况分", quality_breakdown(C(condition_id=3000))["condition"], 75.0)

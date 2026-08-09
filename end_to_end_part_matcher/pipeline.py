@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    search_limit: int = 5
+    search_limit: int = 10
     candidate_limit: int = 15
     request_delay_seconds: float = 0.0
     category_map_path: Path = DEFAULT_CATEGORY_MAP
@@ -132,7 +132,7 @@ def search_candidates(
     category_id = category_info.get("category_id") if category_info else None
     tried: list[dict[str, Any]] = []
     result_sets: list[dict[str, Any]] = []
-    per_source_limit = max(1, min(config.search_limit, 5))
+    per_source_limit = max(1, min(config.search_limit, 10))
     candidate_limit = max(1, min(config.candidate_limit, 15))
 
     if target_mpn_raw and len(target_mpn_raw) >= 3 and not looks_like_ccc_internal_number(target_mpn_raw):
@@ -478,7 +478,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--line-no", type=int, default=1, help="1-based JSONL line or JSON-array index for --input")
     parser.add_argument("--output", type=Path, default=None, help="Optional output JSON path")
     parser.add_argument("--category-map", type=Path, default=DEFAULT_CATEGORY_MAP)
-    parser.add_argument("--search-limit", type=int, default=5, help="Per-source candidate limit (hard maximum: 5)")
+    parser.add_argument("--search-limit", type=int, default=10, help="Per-source candidate limit (hard maximum: 10)")
     parser.add_argument("--candidate-limit", type=int, default=15, help="Merged candidate limit (hard maximum: 15)")
     parser.add_argument("--request-delay", type=float, default=0.0, help="Optional delay between eBay detail requests")
     parser.add_argument("--no-llm", action="store_true", help="Do not call the LLM for n-gram review cases")

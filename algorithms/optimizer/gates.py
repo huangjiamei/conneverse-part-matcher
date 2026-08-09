@@ -9,10 +9,15 @@
   - 拒绝原因是机器可读字符串, 上层可以统计 funnel
   - Gate 配置 (阈值) 通过 GatesConfig 传, 不 hardcode
 
-§四 的三类 gate:
-  固定不可关     For parts 排除 (condition_id==7000)、卖家最低线 (98% / 100)
-  preset 拨     在库门槛、只收新件、允许二手、到货硬截止
-  独立合规开关   仅美国 (require_domestic, 不绑 preset, 默认关)
+三类 gate:
+  固定不可关     For parts 排除 (condition_id==7000)、卖家最低线 (98% / 100)、
+                 warranty ≥1 年 (TOLERANT, 缺失放行)
+  preset 拨     在库门槛
+  独立开关       仅美国 (require_domestic)、到货硬截止 (max_delivery_days), 均默认关
+
+新件/二手不再进 gate: "偏新" 完全是软偏好, 由质量分的件况子分体现
+(New=100 > New other=90 > Reman=82 > Used=75 > Acceptable=60)。
+For parts (7000) 是功能性排除 —— 那是坏件, 不是 "旧一点的件"。
 """
 from __future__ import annotations
 
@@ -21,9 +26,6 @@ from typing import Optional
 
 from .candidate import Candidate
 
-# eBay conditionId 分界 (§三.3 ② 的桶):
-CONDITION_NEW = 1000
-CONDITION_USED_FLOOR = 3000       # >=3000 起算二手 (3000-5999 Used, 6000 Acceptable)
 CONDITION_FOR_PARTS = 7000        # 坏件/拆车件, 永远排除
 
 
@@ -35,10 +37,15 @@ class GatesConfig:
     min_seller_feedback_pct: float = 98.0
     min_seller_feedback_count: int = 100
 
+    # warranty 最低线: ≥1 年。TOLERANT 口径 —— 只踢"能证明不达标"的
+    # (明确写无保修 / 明确 <12 个月), 缺失和含糊一律放行。
+    # v4 数据 (7,552 item, verified 3,809): 该字段填充率只有 62%, 严格口径会砍掉
+    # 一半候选且其中 82% 是"没填"而非"保修短", 故取 TOLERANT。
+    require_warranty: bool = True
+    min_warranty_months: float = 12.0
+
     # ---------- preset 拨的开关 ----------
     require_in_stock: bool = True         # 在库门槛
-    require_new: bool = False             # 只收新件: conditionId != 1000 拒
-    allow_used: bool = False              # False 时 conditionId >= 3000 拒
 
     # ---------- 独立开关 (不绑 preset, 默认关) ----------
     # "仅美国": 发货地约束, 不是质量信号, 谁有合规要求谁单独开。
@@ -59,17 +66,6 @@ def _gate_for_parts(c: Candidate, cfg: GatesConfig) -> Optional[str]:
     return None
 
 
-def _gate_condition(c: Candidate, cfg: GatesConfig) -> Optional[str]:
-    """只收新件 / 允许二手。缺 condition_id 放行 (不因为拿不到件况就砍候选)。"""
-    if c.condition_id is None:
-        return None
-    if cfg.require_new and c.condition_id != CONDITION_NEW:
-        return f"condition:not_new:{c.condition_id}"
-    if not cfg.allow_used and c.condition_id >= CONDITION_USED_FLOOR:
-        return f"condition:used:{c.condition_id}"
-    return None
-
-
 def _gate_stock(c: Candidate, cfg: GatesConfig) -> Optional[str]:
     if not cfg.require_in_stock:
         return None
@@ -84,6 +80,23 @@ def _gate_seller(c: Candidate, cfg: GatesConfig) -> Optional[str]:
         return f"seller_feedback:{c.seller_feedback_pct:.1f}%"
     if c.seller_feedback_count and c.seller_feedback_count < cfg.min_seller_feedback_count:
         return f"seller_count:{c.seller_feedback_count}"
+    return None
+
+
+def _gate_warranty(c: Candidate, cfg: GatesConfig) -> Optional[str]:
+    """
+    warranty ≥1 年 (TOLERANT)。只踢能证明不达标的:
+      明确写"无保修"            -> 砍
+      解析出时长且 <12 个月       -> 砍
+      缺失 / 含糊 ("Yes"/"Other") -> 放行 (不填 ≠ 没保修)
+      ≥12 个月 / Lifetime        -> 放行
+    """
+    if not cfg.require_warranty:
+        return None
+    if c.warranty_none:
+        return "warranty:none"
+    if c.warranty_months is not None and c.warranty_months < cfg.min_warranty_months:
+        return f"warranty:{int(c.warranty_months)}mo"
     return None
 
 
@@ -118,9 +131,9 @@ def _gate_fitment(c: Candidate, cfg: GatesConfig) -> Optional[str]:
 # 顺序: 固定门槛在前 (最常命中), 可选开关在后
 _GATES = [
     _gate_for_parts,
-    _gate_condition,
     _gate_stock,
     _gate_seller,
+    _gate_warranty,
     _gate_delivery,
     _gate_country,
     _gate_fitment,

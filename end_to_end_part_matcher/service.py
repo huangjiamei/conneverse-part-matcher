@@ -27,7 +27,7 @@ from algorithms.optimizer import (
     PRESETS,
 )
 
-DEFAULT_PRESET = "Balanced"
+DEFAULT_PRESET = "Budget"
 
 # uvicorn 只给自己的 logger 装 handler, root 是空的; 不配置的话 pipeline 里
 # 那句 "compat: using category X from ..." 看不到。

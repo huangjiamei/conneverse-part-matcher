@@ -48,7 +48,12 @@ class Candidate:
     # 缺失和"不接受"必须分开: 前者质量分给中性 50, 后者给 0。
     returns_accepted: Optional[bool] = None
     return_period_days: Optional[int] = None
-    warranty_years: Optional[float] = None    # 从 aspect 归一化, 详见 adapter
+    warranty_years: Optional[float] = None    # 从 aspect 归一化, 详见 adapter (质量分用)
+    # 第 1 层 warranty gate 用, 由 warranty.parse_warranty() 产出:
+    #   warranty_months  只在真解析出时长时有值; "Yes" 这种含糊值是 None (未知, 放行)
+    #   warranty_none    卖家明确写了"无保修" —— 跟字段缺失不是一回事
+    warranty_months: Optional[float] = None
+    warranty_none: bool = False
 
     # ---------- 地理 ----------
     country: str = ""  # "US", "CN", ...

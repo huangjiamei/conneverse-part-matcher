@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .candidate import Candidate
+from .warranty import parse_warranty
 
 
 def _to_float(v: Any) -> float:
@@ -50,37 +51,8 @@ def _find_aspect(raw: dict, name: str) -> Optional[str]:
 
 
 def _parse_warranty_years(v: Optional[str]) -> Optional[float]:
-    """
-    Warranty aspect 值多样: "1 Year", "2 Years", "Lifetime", "60 Day", "Yes", "None"...
-    归一化到年数. 无法解析返回 None.
-
-    覆盖:
-      "1 Year", "1Year", "1 year unlimited-mileage warranty" -> 1.0
-      "Lifetime" -> 99.0 (哨兵值)
-      "60 Day" -> 0.16
-      "6 Months" -> 0.5
-      "Yes" -> 0.5 (有但没说, 保守)
-      "None" / "No" -> 0.0
-    """
-    if not v:
-        return None
-    v = v.strip().lower()
-    if v in ("yes",):
-        return 0.5
-    if v in ("no", "none"):
-        return 0.0
-    if "lifetime" in v:
-        return 99.0
-    m = re.match(r"(\d+)\s*[- ]?\s*year", v)
-    if m:
-        return float(m.group(1))
-    m = re.match(r"(\d+)\s*[- ]?\s*month", v)
-    if m:
-        return float(m.group(1)) / 12
-    m = re.match(r"(\d+)\s*[- ]?\s*day", v)
-    if m:
-        return float(m.group(1)) / 365
-    return None
+    """兼容封装: 老调用方只要年数。完整解析见 warranty.parse_warranty()。"""
+    return parse_warranty(v).years
 
 
 def _parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
@@ -177,7 +149,7 @@ def build_candidate_from_ebay(raw: dict, now: Optional[datetime] = None) -> Cand
 
     # ---- Warranty (从 aspects 提取, 归一化到年数) ----
     warranty_raw = _find_aspect(raw, "Manufacturer Warranty") or _find_aspect(raw, "Warranty")
-    warranty_years = _parse_warranty_years(warranty_raw)
+    warranty = parse_warranty(warranty_raw)
 
     # ---- Location ----
     country = ((raw.get("itemLocation") or {}).get("country")) or ""
@@ -200,7 +172,9 @@ def build_candidate_from_ebay(raw: dict, now: Optional[datetime] = None) -> Cand
         delivery_days_max=delivery_max,
         returns_accepted=returns_accepted,
         return_period_days=return_period_days,
-        warranty_years=warranty_years,
+        warranty_years=warranty.years,
+        warranty_months=warranty.months,
+        warranty_none=warranty.is_none,
         country=country,
         # 以下 eBay 拿不到, 保持 None
         product_rating=None,
