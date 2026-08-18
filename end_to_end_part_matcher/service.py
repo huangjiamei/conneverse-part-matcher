@@ -12,9 +12,10 @@ from typing import Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .pipeline import PipelineConfig, match_source_part
+from .utils import normalize_delivery_zip
 from .taxonomy import (
     DEFAULT_ROOT_CATEGORY_ID,
     MOTORS_CATEGORY_TREE_ID,
@@ -72,9 +73,20 @@ class SourcePartInfo(BaseModel):
 
 
 class MatchRequest(BaseModel):
+    # deliveryZip / delivery_zip 两种写法都收
+    model_config = ConfigDict(populate_by_name=True)
+
     source_part_info: SourcePartInfo
     use_llm: bool = Field(default=False)
     preset: Optional[str] = Field(default=None)
+    # 收货地邮编 (可选): 有效的 5 位美国邮编 → eBay 按这个地址算运费和送达时间;
+    # 缺省或写错 → 归一成 None, 静默走原来的通用运费, 不报错。
+    delivery_zip: Optional[str] = Field(default=None, alias="deliveryZip")
+
+    @field_validator("delivery_zip", mode="before")
+    @classmethod
+    def _normalize_zip(cls, value: Any) -> Optional[str]:
+        return normalize_delivery_zip(value)
     # eBay 类目路由: 调用方 (/search 选了具体 Part) 查 PCdb -> eBay 映射表得到。
     # 有值 → 第 2 档 compat 用它 (primary 空则依次试 fallback);
     # null → 回退 part_desc_to_category.json 查表 (RO PartLine / 自由文本)。
@@ -93,7 +105,7 @@ def match(request: MatchRequest) -> dict[str, Any]:
     try:
         result = match_source_part(
             request.source_part_info.model_dump(),
-            config=PipelineConfig(use_llm=request.use_llm),
+            config=PipelineConfig(use_llm=request.use_llm, delivery_zip=request.delivery_zip),
             ebay_category_id=request.ebay_category_id,
             ebay_fallback_category_ids=request.ebay_fallback_category_ids,
         )

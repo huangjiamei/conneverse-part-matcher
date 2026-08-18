@@ -95,7 +95,20 @@ curl -X POST http://127.0.0.1:8001/api/match \
       "part_type": "aftermarket",
       "part_number": "84878964"
     },
-    "use_llm": false
+    "use_llm": false,
+    "deliveryZip": "94107"
   }'
+```
+
+`deliveryZip` 可选 (`delivery_zip` 同样接受): 5 位美国邮编, 传了之后 eBay 返回的运费和
+送达时间是发到这个地址的值, 而不是默认地点的通用值。没传或不是 5 位数字就静默忽略,
+行为和以前一致 —— 不会因为这个参数报错。实际生效的值回写在
+`dataset_meta.delivery_zip_used`。
+
+自测 (离线不需要凭证; `--live` 会真连 eBay 比较两个远距离邮编):
+
+```powershell
+python tests/test_delivery_zip.py
+python tests/test_delivery_zip.py --live
 ```
 

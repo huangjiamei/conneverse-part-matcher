@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from .pipeline import PipelineConfig, match_source_part
+from .utils import normalize_delivery_zip
 
 
 WEB_ROOT = Path(__file__).with_name("web_assets")
@@ -86,8 +87,15 @@ def create_server(*, host: str = "127.0.0.1", port: int = 8000, matcher: Matcher
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
+            # deliveryZip / delivery_zip 都收; 无效值归一成 None, 不让请求失败
+            delivery_zip = normalize_delivery_zip(
+                payload.get("deliveryZip") if payload.get("deliveryZip") is not None else payload.get("delivery_zip")
+            )
             try:
-                result = matcher(source, config=PipelineConfig(use_llm=payload.get("use_llm") is True))
+                result = matcher(source, config=PipelineConfig(
+                    use_llm=payload.get("use_llm") is True,
+                    delivery_zip=delivery_zip,
+                ))
             except Exception as exc:
                 self._send_json({"error": str(exc) or exc.__class__.__name__}, status=502)
                 return

@@ -37,6 +37,16 @@ def normalize_mpn(raw: Any) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", str(raw or "")).upper()
 
 
+def normalize_delivery_zip(raw: Any) -> str | None:
+    """宽松校验美国 5 位邮编, 拿不到就返回 None (调用方静默跳过, 不报错)。
+
+    接受 "94107" / " 94107 " / "94107-1234" / 数字 94107; 其他一律 None ——
+    这个参数只影响运费/时效的取数精度, 不该让整个搜索失败。
+    """
+    match = re.fullmatch(r"(\d{5})(?:-\d{4})?", str(raw or "").strip())
+    return match.group(1) if match else None
+
+
 MAKE_ABBREVIATION_MAP = {
     "HOND": "Honda", "TOYO": "Toyota", "BUIC": "Buick", "MAZD": "Mazda", "HYUN": "Hyundai",
     "CHEV": "Chevrolet", "FORD": "Ford", "NISS": "Nissan", "SUBA": "Subaru", "VW": "Volkswagen",

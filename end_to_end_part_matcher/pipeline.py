@@ -28,6 +28,9 @@ class PipelineConfig:
     use_llm: bool = True
     llm_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     llm_min_positive_confidence: float = 0.85
+    # 收货地邮编: 传给 eBay Browse 后, 运费/送达时间按这个地址算而不是默认地点。
+    # 非法/缺省一律忽略, 行为回到原来的通用运费。
+    delivery_zip: str | None = None
 
 
 def match_source_part(
@@ -48,11 +51,15 @@ def match_source_part(
     ``ebay_category_id`` / ``ebay_fallback_category_ids`` come from the caller's
     PCdb -> eBay mapping table (normalized part pick). When set they drive the
     compatibility tier; otherwise it falls back to the description -> category JSON.
+
+    ``config.delivery_zip`` 只在这里自建 client 时生效; 调用方自己传 ``ebay_client``
+    的话, 收货地跟着那个 client 走 (见 EbayClient(delivery_zip=...))。
     """
 
     config = config or PipelineConfig()
     source = normalize_source_part_info(source_part_info)
-    ebay = ebay_client or EbayClient()
+    ebay = ebay_client or EbayClient(delivery_zip=config.delivery_zip)
+    delivery_zip_used = getattr(ebay, "delivery_zip", None)
     category_lookup = get_category_lookup(config.category_map_path)
 
     items, tried_levels, category_info = search_candidates(
@@ -112,6 +119,8 @@ def match_source_part(
             "keyword_category_id_used": (category_info or {}).get("keyword_category_id_used"),
             "detail_errors": detail_errors,
             "post_mpn_stage_counts": stage_counts,
+            # 实际生效的收货地 (无效/未传 = None, 运费为默认地点的通用值)
+            "delivery_zip_used": delivery_zip_used,
         },
     }
 
@@ -483,6 +492,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-delay", type=float, default=0.0, help="Optional delay between eBay detail requests")
     parser.add_argument("--no-llm", action="store_true", help="Do not call the LLM for n-gram review cases")
     parser.add_argument("--llm-model", default=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+    parser.add_argument("--delivery-zip", default=None, help="5-digit US ZIP for destination-aware shipping cost / delivery estimate; ignored if not a valid ZIP")
     parser.add_argument("--ebay-category-id", default=None, help="eBay category for the compat tier (from the PCdb mapping table); omit to fall back to the description JSON")
     parser.add_argument("--ebay-fallback-category-ids", default="", help="Comma-separated fallback categories tried when the primary returns nothing")
     parser.add_argument("--pretty", action="store_true")
@@ -502,6 +512,7 @@ def main() -> None:
         category_map_path=resolve_repo_path(args.category_map),
         use_llm=not args.no_llm,
         llm_model=args.llm_model,
+        delivery_zip=args.delivery_zip,
     )
     fallback_ids = [part.strip() for part in str(args.ebay_fallback_category_ids or "").split(",") if part.strip()]
     record = match_source_part(

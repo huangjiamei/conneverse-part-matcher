@@ -9,10 +9,16 @@ import urllib.parse
 import urllib.request
 from typing import Any, Mapping
 
-from .utils import clean_part_description, extract_core_keyword, load_dotenv
+from .utils import clean_part_description, extract_core_keyword, load_dotenv, normalize_delivery_zip
 
 EBAY_API_BASE = "https://api.ebay.com"
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
+BROWSE_API_PREFIX = "/buy/browse/"
+
+
+def end_user_context(delivery_zip: str) -> str:
+    """X-EBAY-C-ENDUSERCTX 的值: 内层的 = 和 , 要百分号转义 (%3D / %2C)。"""
+    return f"contextualLocation=country%3DUS%2Czip%3D{delivery_zip}"
 
 
 class EbayApiError(RuntimeError):
@@ -51,12 +57,23 @@ def request_json(
 
 
 class EbayClient:
-    """Tiny eBay Browse API client for one-record retrieval."""
+    """Tiny eBay Browse API client for one-record retrieval.
 
-    def __init__(self, *, client_id: str | None = None, client_secret: str | None = None) -> None:
+    ``delivery_zip``: 收货地邮编。带上它, Browse API 返回的是发到这个邮编的运费和
+    送达时间, 而不是默认地点的通用值。非 5 位美国邮编一律当没传 (静默降级)。
+    """
+
+    def __init__(
+        self,
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        delivery_zip: str | None = None,
+    ) -> None:
         load_dotenv()
         self.client_id = client_id or os.getenv("EBAY_CLIENT_ID", "")
         self.client_secret = client_secret or os.getenv("EBAY_CLIENT_SECRET", "")
+        self.delivery_zip = normalize_delivery_zip(delivery_zip)
         self._token = ""
         self._token_expires_at = 0.0
 
@@ -86,14 +103,15 @@ class EbayClient:
 
     def _api_get(self, path: str, params: Mapping[str, Any]) -> dict[str, Any]:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
-        return request_json(
-            f"{EBAY_API_BASE}{path}?{query}",
-            headers={
-                "Authorization": f"Bearer {self.access_token()}",
-                "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-                "Accept": "application/json",
-            },
-        )
+        headers = {
+            "Authorization": f"Bearer {self.access_token()}",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            "Accept": "application/json",
+        }
+        # 只给 Browse (item_summary/search + getItem) 带收货地; Taxonomy 用不上。
+        if self.delivery_zip and path.startswith(BROWSE_API_PREFIX):
+            headers["X-EBAY-C-ENDUSERCTX"] = end_user_context(self.delivery_zip)
+        return request_json(f"{EBAY_API_BASE}{path}?{query}", headers=headers)
 
     def search_by_part_number(self, *, part_number: str, limit: int, category_id: str | None) -> dict[str, Any]:
         items = self._search_items(part_number, limit=limit, category_id=category_id)
