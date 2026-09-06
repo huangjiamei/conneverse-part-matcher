@@ -145,10 +145,36 @@ def search_candidates(
     candidate_limit = max(1, min(config.candidate_limit, 15))
 
     if target_mpn_raw and len(target_mpn_raw) >= 3 and not looks_like_ccc_internal_number(target_mpn_raw):
+        # 类目与第 2 档 (compat) 同源: 表一 (ebay_category_id 映射, +fallback) 优先, 没有
+        # 才回退表二 (part_description 查 JSON), 两者都无则不带类目 (全站搜)。
+        # eBay item_summary/search 每次只收 1 个 category_id (多传报 12030), 所以多类目
+        # 复用 search_over_categories 逐个试 (primary→fallback, 命中即停), 与 compat 一致。
+        if ebay_category_id:
+            mpn_category_ids = _mapping_category_ids(ebay_category_id, ebay_fallback_category_ids)
+            mpn_category_source: str | None = "mapping"
+        elif category_id:
+            mpn_category_ids = [str(category_id)]
+            mpn_category_source = "json"
+        else:
+            mpn_category_ids = []
+            mpn_category_source = None
         try:
-            result = ebay.search_by_part_number(part_number=target_mpn_raw, limit=per_source_limit, category_id=category_id)
-            tried.append(result["searchMeta"])
-            result_sets.append(result)
+            if mpn_category_ids:
+                result, _ = search_over_categories(
+                    mpn_category_ids,
+                    level="mpn",
+                    query=target_mpn_raw,
+                    primary_source=mpn_category_source,
+                    tried=tried,
+                    run_search=lambda cid: ebay.search_by_part_number(
+                        part_number=target_mpn_raw, limit=per_source_limit, category_id=str(cid)
+                    ),
+                )
+            else:
+                result = ebay.search_by_part_number(part_number=target_mpn_raw, limit=per_source_limit, category_id=None)
+                tried.append(result["searchMeta"])
+            if result:
+                result_sets.append(result)
         except EbayApiError as exc:
             if exc.fatal or exc.status in {401, 403}:
                 raise

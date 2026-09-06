@@ -29,7 +29,12 @@ class FakeEbay:
 
     def search_by_part_number(self, *, part_number: str, limit: int, category_id: str | None) -> dict[str, Any]:
         self.mpn_calls.append(category_id)
-        return {"items": [], "searchMeta": {"level": "mpn", "query": part_number, "resultCount": 0}}
+        # 裸搜 (category_id=None) 视作总有结果 (全站兜底); 带类目时按命中集判定。
+        hit = category_id is None or category_id in self.categories_with_hits
+        items = [{"itemId": f"m1|{category_id}|0"}] if hit else []
+        return {"items": items, "searchMeta": {
+            "level": "mpn", "query": part_number, "categoryId": category_id, "resultCount": len(items),
+        }}
 
     def search_by_compatibility(self, *, query: str, category_id: str, compatibility_filter: str, limit: int) -> dict[str, Any]:
         self.compat_calls.append(category_id)
@@ -91,11 +96,11 @@ def main() -> None:
     check("compat_category_source", out["meta"]["compat_category_source"], "mapping")
     check("compat_category_id_used", out["meta"]["compat_category_id_used"], "33564")
 
-    print("\n1b) 第 3 档 keyword 也用映射表类目; 第 1 档 MPN 不受影响 (仍用 JSON 类目)")
+    print("\n1b) 第 1 档 MPN 与第 3 档 keyword 都用映射表类目 (MPN 已改为与 compat 同源)")
     ebay = FakeEbay(categories_with_hits={"33564"})
     source = {**SOURCE, "part_number": "521590X915"}
     out = run(ebay=ebay, source=source, ebay_category_id=33564, ebay_fallback_category_ids=[33640])
-    check("mpn tier category (JSON, 未改)", ebay.mpn_calls, [json_category.get("category_id")])
+    check("mpn tier category (mapping, 已改)", ebay.mpn_calls, ["33564"])
     check("keyword tier category (mapping)", ebay.keyword_calls, ["33564"])
     check("keyword_category_source", out["meta"]["keyword_category_source"], "mapping")
     check("keyword_category_id_used", out["meta"]["keyword_category_id_used"], "33564")
@@ -162,6 +167,28 @@ def main() -> None:
         check(f"compat 跳过 ({desc!r})", ebay.compat_calls, [])
         check("keyword calls", ebay.keyword_calls, [str(no_compat["category_id"])])
         check("keyword_category_source", out["meta"]["keyword_category_source"], "json")
+
+    print("\n9) MPN 档: 传 ebay_category_id -> 用映射表类目 (primary), 不用 JSON 类目")
+    source = {**SOURCE, "part_number": "521590X915"}  # 描述 bumper cover 的 JSON 类目是 262146
+    ebay = FakeEbay(categories_with_hits={"33564"})
+    run(ebay=ebay, source=source, ebay_category_id=33564, ebay_fallback_category_ids=[33640])
+    check("mpn 用 mapping primary", ebay.mpn_calls, ["33564"])
+    check("mpn 没用 JSON 类目", str(json_category.get("category_id")) in ebay.mpn_calls, False)
+
+    print("\n9b) MPN 档: mapping primary 空 -> 依次试 fallback (与 compat 同逻辑)")
+    ebay = FakeEbay(categories_with_hits={"33640"})
+    run(ebay=ebay, source=source, ebay_category_id=33564, ebay_fallback_category_ids=[33640])
+    check("mpn primary→fallback", ebay.mpn_calls, ["33564", "33640"])
+
+    print("\n10) MPN 档: 没传 ebay_category_id -> 回退 JSON 类目 (表二查描述)")
+    ebay = FakeEbay(categories_with_hits={str(json_category.get("category_id"))})
+    run(ebay=ebay, source=source)
+    check("mpn 回退 JSON 类目", ebay.mpn_calls, [str(json_category.get("category_id"))])
+
+    print("\n11) MPN 档: 既无 mapping, JSON 也查不到描述 -> 不带类目, 全站搜 (category_id=None)")
+    ebay = FakeEbay(categories_with_hits=set())
+    run(ebay=ebay, source={**SOURCE, "part_number": "521590X915", "part_description": "zzz unknown widget qqq"})
+    check("mpn 裸搜 (None)", ebay.mpn_calls, [None])
 
     failures = globals().get("FAILURES", 0)
     print(f"\n{'FAILED: ' + str(failures) + ' check(s)' if failures else 'ALL CHECKS PASSED'}")
