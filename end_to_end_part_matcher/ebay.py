@@ -164,6 +164,44 @@ class EbayClient:
         encoded = urllib.parse.quote(item_id, safe="")
         return self._api_get(f"/buy/browse/v1/item/{encoded}", {"fieldgroups": "PRODUCT"})
 
+    def get_compatibility_property_values(
+        self, *, category_id: str, compatibility_property: str, filter_dict: Mapping[str, str]
+    ) -> list[str]:
+        """Taxonomy tree 100 (eBay Motors) 下某类目+车辆过滤的合法属性值 (Model/Trim/Engine)。
+
+        供 compat 适配闸把我方车辆对齐到 eBay 目录值用。非 200 由 request_json 抛
+        EbayApiError, 调用方 (compat_gate) 捕获后 fail-open。
+        """
+        f = ",".join(f"{k}:{v}" for k, v in filter_dict.items())
+        data = self._api_get(
+            "/commerce/taxonomy/v1/category_tree/100/get_compatibility_property_values",
+            {"category_id": str(category_id), "compatibility_property": compatibility_property, "filter": f},
+        )
+        return [v.get("value") for v in (data.get("compatibilityPropertyValues") or []) if v.get("value")]
+
+    def check_compatibility(self, *, item_id: str, compatibility_properties: list[dict[str, str]]) -> dict[str, Any]:
+        """Browse check_compatibility: 传车辆属性判断某 listing 装不装。
+
+        返回体含 compatibilityStatus (COMPATIBLE / NOT_COMPATIBLE / UNDETERMINED) 与
+        warnings (11504=缺 Trim/Engine, 11505=没挂 ACES)。11505/404 等以 4xx 抛
+        EbayApiError, 由调用方 fail-open 处理。
+        """
+        encoded = urllib.parse.quote(item_id, safe="")
+        headers = {
+            "Authorization": f"Bearer {self.access_token()}",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            "Content-Type": "application/json",
+            "Content-Language": "en-US",
+            "Accept": "application/json",
+        }
+        if self.delivery_zip:
+            headers["X-EBAY-C-ENDUSERCTX"] = end_user_context(self.delivery_zip)
+        body = json.dumps({"compatibilityProperties": compatibility_properties}).encode()
+        return request_json(
+            f"{EBAY_API_BASE}/buy/browse/v1/item/{encoded}/check_compatibility",
+            method="POST", headers=headers, data=body,
+        )
+
     def get_category_subtree(self, *, category_id: int | str, category_tree_id: str) -> dict[str, Any]:
         """Taxonomy API: one node plus its whole descendant subtree.
 

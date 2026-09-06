@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .compat_gate import apply_compat_gate
 from .ebay import EbayApiError, EbayClient
 from .mpn import extract_compatibility_properties, label_by_mpn, looks_like_ccc_internal_number
 from .semantics import OpenAISemanticJudge, apply_ngram_and_llm
@@ -31,6 +32,8 @@ class PipelineConfig:
     # 收货地邮编: 传给 eBay Browse 后, 运费/送达时间按这个地址算而不是默认地点。
     # 非法/缺省一律忽略, 行为回到原来的通用运费。
     delivery_zip: str | None = None
+    # checkCompatibility 适配闸: strict(默认,删跨车型 NOT) / loose(只删标题不含查询车型的 NOT) / off(只标记不删)
+    compat_gate_mode: str = os.getenv("COMPAT_GATE_MODE", "strict")
 
 
 def match_source_part(
@@ -81,6 +84,11 @@ def match_source_part(
             min_positive_confidence=config.llm_min_positive_confidence,
         ),
     )
+    # checkCompatibility 适配闸: 只在 label=1 候选上跑, 明确 NOT 的按模式筛掉 (只减不加)。
+    # 放在 labeling 之后、汇总之前, 这样被删的 label=1 会正确反映到 label/命中数上。
+    candidates, gate_removed, gate_stats = apply_compat_gate(
+        source, candidates, ebay=ebay, mode=config.compat_gate_mode
+    )
     label, label_source = summarize_record_label(candidates)
     final_positive_count = sum(1 for c in candidates if c.get("candidate_label") == 1)
     mpn_positive_count = sum(1 for c in candidates if _has_mpn_positive_source(c))
@@ -121,6 +129,14 @@ def match_source_part(
             "post_mpn_stage_counts": stage_counts,
             # 实际生效的收货地 (无效/未传 = None, 运费为默认地点的通用值)
             "delivery_zip_used": delivery_zip_used,
+            # checkCompatibility 适配闸的统计 + 被筛掉的候选 (可观测性)
+            "compat_gate": gate_stats,
+            "compat_gate_removed": [
+                {"item_id": c.get("item_id"), "title": c.get("title"),
+                 "compat_verdict": (c.get("compat_gate") or {}).get("verdict"),
+                 "rule": (c.get("compat_gate") or {}).get("rule")}
+                for c in gate_removed
+            ],
         },
     }
 
@@ -451,6 +467,8 @@ def build_candidate_info(detail: Mapping[str, Any], *, target_mpn_raw: str) -> d
         "condition": detail.get("condition") or "",
         "item_id": detail.get("itemId"),
         "item_web_url": detail.get("itemWebUrl"),
+        # 直接读 getItem(PRODUCT) 响应里的 categoryId (不额外调用); compat 适配闸对齐要用。
+        "category_id": detail.get("categoryId"),
         "price": detail.get("price"),
         "candidate_label": candidate_label,
         "candidate_label_source": candidate_label_source,
