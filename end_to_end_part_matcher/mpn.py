@@ -82,14 +82,85 @@ def is_title_token_hit(title: Any, target_mpn: str, target_mpn_loose: str) -> bo
 
 
 def extract_compatibility_properties(item: Mapping[str, Any]) -> dict[str, Any]:
+    # 适配: 只留车辆维度; 去掉 Universal Fitment / Performance Part (基本恒为 "No", 噪声)。
     keys = [
         "Compatible Makes", "Make", "Brand", "Model", "Fitment Type", "Placement on Vehicle", "Year",
-        "Placement", "Compatibility", "Interchange Item Code", "Universal Fitment", "Performance Part",
+        "Placement", "Compatibility", "Interchange Item Code",
     ]
     result = {key: value for key in keys if (value := _aspect_value(item, key))}
     if item.get("categoryPath"):
         result["categoryPath"] = item.get("categoryPath")
     return result
+
+
+# 分类零件号: (输出 key, aspect 名) —— 前端按此顺序分行展示, 各自带标签。
+CLASSIFIED_PN_ASPECTS: list[tuple[str, str]] = [
+    ("oe", "OE/OEM Part Number"),
+    ("mpn", "Manufacturer Part Number"),
+    ("interchange", "Interchange Part Number"),
+    ("superseded", "Superseded Part Number"),
+]
+
+
+def _clean_pn_list(raw_value: Any) -> list[str]:
+    """清洗一个零件号 aspect 值: 去 "Xxx:" 前缀、按逗号/斜杠拆、按归一化去重 (保留展示原值)。
+
+    只按逗号/分号/斜杠拆, 不按空格 —— "86612 M7200" 是一个带空格的号, 不能拆开。
+    """
+    s = str(raw_value or "").strip()
+    if not s:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in re.split(r"[;,/]", s):
+        part = re.sub(r"^\s*[A-Za-z][A-Za-z /]*:\s*", "", part).strip()  # 去 "Interchange:" 之类前缀
+        if not part:
+            continue
+        key = normalize_mpn(part)  # 去空格/连字符 + 大写
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(part)
+    return out
+
+
+def extract_classified_part_numbers(item: Mapping[str, Any]) -> dict[str, list[str]]:
+    """分类保留零件号 (带类型标签, 清洗去重), 供前端分行展示。
+    不影响 extract_all_mpn_candidates / part_number_list 的匹配逻辑。"""
+    out: dict[str, list[str]] = {}
+    for key, aspect_name in CLASSIFIED_PN_ASPECTS:
+        values = _clean_pn_list(_aspect_value(item, aspect_name))
+        if values:
+            out[key] = values
+    return out
+
+
+# 规格: 固定项 + 尺寸/规格类关键词 (aspect 名命中即收)。
+SPEC_FIXED = ("Type", "Material", "Color", "Country of Origin", "Finish", "Genuine OEM")
+SPEC_KEYWORDS = ("diameter", "bolt pattern", "length", "width", "height", "thickness",
+                 "size", "number in pack", "voltage", "wattage")
+# 已被别处消费的 aspect (号/适配/warranty), specs 不重复收。
+_PN_ASPECT_NAMES = {a for _, a in CLASSIFIED_PN_ASPECTS} | {"PartNumber"}
+_COMPAT_ASPECT_NAMES = {
+    "Compatible Makes", "Make", "Brand", "Model", "Fitment Type", "Placement on Vehicle",
+    "Year", "Placement", "Compatibility", "Interchange Item Code", "Universal Fitment", "Performance Part",
+}
+_WARRANTY_ASPECT_NAMES = {"Manufacturer Warranty", "Warranty"}
+
+
+def extract_specs(item: Mapping[str, Any]) -> dict[str, str]:
+    """规格结构: 固定项 + 名字命中尺寸/规格关键词的 aspect (有值才带)。号/适配/warranty 不收。"""
+    out: dict[str, str] = {}
+    for aspect in item.get("localizedAspects") or []:
+        name = aspect.get("name")
+        value = aspect.get("value")
+        if not name or not value:
+            continue
+        if name in _PN_ASPECT_NAMES or name in _COMPAT_ASPECT_NAMES or name in _WARRANTY_ASPECT_NAMES:
+            continue
+        if name in SPEC_FIXED or any(kw in name.lower() for kw in SPEC_KEYWORDS):
+            out[name] = value
+    return out
 
 
 def label_by_mpn(detail: Mapping[str, Any], target_mpn_raw: str) -> tuple[int | None, str, list[str], list[str]]:

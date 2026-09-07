@@ -13,7 +13,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .compat_gate import apply_compat_gate
 from .ebay import EbayApiError, EbayClient
-from .mpn import extract_compatibility_properties, label_by_mpn, looks_like_ccc_internal_number
+from .mpn import (
+    extract_classified_part_numbers,
+    extract_compatibility_properties,
+    extract_specs,
+    label_by_mpn,
+    looks_like_ccc_internal_number,
+)
 from .semantics import OpenAISemanticJudge, apply_ngram_and_llm
 from .utils import CategoryLookup, DEFAULT_CATEGORY_MAP, get_category_lookup, normalize_source_part_info, resolve_repo_path
 
@@ -463,6 +469,9 @@ def build_candidate_info(detail: Mapping[str, Any], *, target_mpn_raw: str) -> d
         "subtitle": detail.get("subtitle") or "",
         "part_number_list": mpns,
         "part_number_list_normalized": normalized_mpns,
+        # 分类零件号 (带类型标签, 清洗去重) + 规格 —— 给前端展示用, 不参与匹配。
+        "part_numbers_classified": extract_classified_part_numbers(detail),
+        "specs": extract_specs(detail),
         "compatibility": extract_compatibility_properties(detail),
         "condition": detail.get("condition") or "",
         "item_id": detail.get("itemId"),
