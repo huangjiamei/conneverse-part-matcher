@@ -25,6 +25,7 @@ from .presets import Preset, get_preset
 from .scoring import (
     ScoringConfig,
     compute_landed_anchor,
+    fitment_adjust,
     landed_cost,
     price_score,
     quality_score,
@@ -40,6 +41,8 @@ def optimize(
     weights_price: Optional[float] = None,
     weights_quality: Optional[float] = None,
     weights_speed: Optional[float] = None,
+    user_engine: str = "",
+    user_drive: str = "",
 ) -> Dict[str, Any]:
     """
     对候选列表跑一遍 gate + 打分 + 排序。
@@ -140,11 +143,17 @@ def optimize(
             ps = price_score(landed, anchor)
             ss = speed_score(c.delivery_days_max, scoring_cfg.d_fast, scoring_cfg.d_slow)
             qs = quality_score(c, scoring_cfg)
+            # engine/drive 软信号: 加性微调 (对得上↑ / 冲突↓ / 没提不动), 不进大分、不删。
+            # 用户没选 (两个都空) → adjust 恒 0, total 与不带该信号时逐条一致。
+            adj, es, ds = fitment_adjust(c, user_engine, user_drive, scoring_cfg)
             e["landed"] = landed
             e["price_score"] = ps
             e["speed_score"] = ss
             e["quality_score"] = qs
-            e["total"] = wp * ps + ws * ss + wq * qs
+            e["fitment_adjust"] = adj
+            e["engine_signal"] = es
+            e["drive_signal"] = ds
+            e["total"] = wp * ps + ws * ss + wq * qs + adj
 
         eligible.sort(key=lambda e: e["total"], reverse=True)
         for i, e in enumerate(eligible, start=1):

@@ -119,7 +119,11 @@ def match(request: MatchRequest) -> dict[str, Any]:
     candidates_raw = result.get("candidate_info_list", [])
     preset_name = request.preset or DEFAULT_PRESET
 
-    result["optimizer_result"] = _run_optimizer(candidates_raw, preset_name)
+    veh = request.source_part_info.vehicle
+    result["optimizer_result"] = _run_optimizer(
+        candidates_raw, preset_name,
+        user_engine=veh.engine or "", user_drive=veh.drive or "",
+    )
     return result
 
 
@@ -183,6 +187,9 @@ class RerankCandidate(BaseModel):
 class RerankRequest(BaseModel):
     candidates: List[RerankCandidate]
     preset: str = Field(default=DEFAULT_PRESET)
+    # 可选: 用户选的发动机/驱动, 传了就参与软信号排序 (和 /api/match 一致); 不传则排序不受影响。
+    engine: Optional[str] = ""
+    drive: Optional[str] = ""
 
 
 @app.post("/api/rerank")
@@ -201,7 +208,10 @@ def rerank(request: RerankRequest) -> dict[str, Any]:
 
     # 每条 candidate 转成 dict 后交给 optimizer 的 adapter
     candidates_raw = [c.model_dump() for c in request.candidates]
-    optimizer_result = _run_optimizer(candidates_raw, request.preset)
+    optimizer_result = _run_optimizer(
+        candidates_raw, request.preset,
+        user_engine=request.engine or "", user_drive=request.drive or "",
+    )
     return {"optimizer_result": optimizer_result}
 
 
@@ -209,8 +219,15 @@ def rerank(request: RerankRequest) -> dict[str, Any]:
 # 共享: 跑 optimizer 并组装返回体
 # ============================================================
 
-def _run_optimizer(candidates_raw: list[dict], preset_name: str) -> dict[str, Any]:
-    """Run optimizer over label=1 candidates only. Common code path for both endpoints."""
+def _run_optimizer(
+    candidates_raw: list[dict], preset_name: str,
+    *, user_engine: str = "", user_drive: str = "",
+) -> dict[str, Any]:
+    """Run optimizer over label=1 candidates only. Common code path for both endpoints.
+
+    user_engine / user_drive: 用户选的发动机/驱动 (Phase 1 透传来的人读串)。传进 optimizer
+    做软信号排序 (对得上↑ / 冲突↓ / 没提不动), 不删不排除。两个都空 → 排序与不带该信号一致。
+    """
     eligible_for_optim = [
         (idx, c) for idx, c in enumerate(candidates_raw)
         if c.get("candidate_label") == 1
@@ -234,7 +251,9 @@ def _run_optimizer(candidates_raw: list[dict], preset_name: str) -> dict[str, An
 
     try:
         optim_cands = [build_candidate_from_matcher(c) for _, c in eligible_for_optim]
-        optim_out = optimize(optim_cands, preset=preset_name)
+        optim_out = optimize(
+            optim_cands, preset=preset_name, user_engine=user_engine, user_drive=user_drive
+        )
 
         result["eligible"] = [
             {
@@ -244,6 +263,10 @@ def _run_optimizer(candidates_raw: list[dict], preset_name: str) -> dict[str, An
                 "price_score": round(e["price_score"], 2),
                 "speed_score": round(e["speed_score"], 2),
                 "quality_score": round(e["quality_score"], 2),
+                # engine/drive 软信号明细 (观察用): 加性微调 + 三态信号 (+1/0/-1)
+                "fitment_adjust": round(e.get("fitment_adjust", 0.0), 2),
+                "engine_signal": e.get("engine_signal", 0),
+                "drive_signal": e.get("drive_signal", 0),
             }
             for e in optim_out["eligible"]
         ]

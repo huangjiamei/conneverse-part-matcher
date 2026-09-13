@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
@@ -37,6 +38,15 @@ class ScoringConfig:
 
     # ---- popularity 标定点 (§三.3 ④): sold=50 时满分 ----
     popularity_full_scale_sold: int = 50
+
+    # ---- fitment 软信号 (engine / drive) ----
+    # 用户选的发动机/驱动 vs 候选文本 (title+specs+compatibility) 的加性微调, 不进 0-100 大分:
+    #   对得上 → 加分 / 明确冲突 → 减分 / 没提 → 0 (缺失不罚, 这是量化那次误杀的教训)。
+    # engine 权重 > drive (更多件按发动机分, listing 也更常写发动机)。温和, 不做一票否决。
+    w_engine_match: float = 8.0
+    w_engine_conflict: float = 8.0
+    w_drive_match: float = 3.0
+    w_drive_conflict: float = 3.0
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -213,6 +223,106 @@ def quality_score(c: Candidate, cfg: Optional[ScoringConfig] = None) -> float:
         + cfg.w_assurance * assurance_subscore(c)
         + cfg.w_popularity * popularity_subscore(c, cfg.popularity_full_scale_sold)
     )
+
+
+# =====================================================================
+# fitment 软信号: engine / drive (加性微调, 不删不排除)
+#
+# 纯本地文本比对 (candidate title + specs + compatibility vs 用户选的 engine/drive),
+# 不新增任何 eBay 调用。三态: +1 对得上 / 0 没提 (缺失不罚) / -1 明确冲突。
+# =====================================================================
+
+# 候选文本里出现的排量, 如 "4.3L" / "2.0 L" → 捕获 "4.3"。要求带 L, 避免误抓年份/尺寸。
+_DISPLACEMENT_RE = re.compile(r"(\d\.\d)\s*l\b")
+# 驱动词 → 归一 token (与 VCdb DriveType 的 FWD/RWD/AWD/4WD 对齐; 2WD 是卡车常见泛称)
+_DRIVE_PATTERNS = [
+    ("4WD", re.compile(r"\b(?:4wd|4x4|four[\s-]?wheel[\s-]?drive)\b")),
+    ("AWD", re.compile(r"\b(?:awd|all[\s-]?wheel[\s-]?drive)\b")),
+    ("FWD", re.compile(r"\b(?:fwd|front[\s-]?wheel[\s-]?drive)\b")),
+    ("RWD", re.compile(r"\b(?:rwd|rear[\s-]?wheel[\s-]?drive)\b")),
+    ("2WD", re.compile(r"\b(?:2wd|2x4|two[\s-]?wheel[\s-]?drive)\b")),
+]
+
+
+def _candidate_fitment_text(c: Candidate) -> str:
+    """候选可供比对的文本: title + subtitle + specs/compatibility 的值。全 lowercase。"""
+    raw = c.raw or {}
+    parts = [c.title or "", str(raw.get("subtitle") or "")]
+    for key in ("specs", "compatibility"):
+        d = raw.get(key)
+        if isinstance(d, dict):
+            for k, v in d.items():
+                parts.append(f"{k} {v}")
+    return " ".join(parts).lower()
+
+
+def _user_engine_liter(user_engine: str) -> Optional[str]:
+    """从用户 engine 串取排量键 (如 "4.3L V6 GAS ..." → "4.3")。镜像 align_engine 的 liter 归一。"""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*l\b", user_engine.lower())
+    return m.group(1) if m else None
+
+
+def engine_signal(text: str, user_engine: str) -> int:
+    """+1 候选明说的排量含用户排量 / 0 候选没提任何排量 (缺失不罚) / -1 提了但都不含用户排量。"""
+    if not user_engine:
+        return 0
+    ul = _user_engine_liter(user_engine)
+    if not ul:
+        return 0
+    disps = {m.group(1) for m in _DISPLACEMENT_RE.finditer(text)}
+    if not disps:
+        return 0                      # 没提排量 = 缺失, 不罚
+    return 1 if ul in disps else -1   # 提了: 含用户排量→对上; 全不含→明确冲突
+
+
+def _drives_in_text(text: str) -> set:
+    return {tok for tok, pat in _DRIVE_PATTERNS if pat.search(text)}
+
+
+def drive_signal(text: str, user_drive: str) -> int:
+    """+1 对得上 / 0 候选没提驱动 / -1 提了但和用户驱动都不兼容。2WD 视作兼容 FWD/RWD。"""
+    if not user_drive:
+        return 0
+    ud = re.sub(r"[^A-Z0-9]", "", user_drive.upper())  # "AWD" / "4WD" / ...
+    if ud not in {"FWD", "RWD", "AWD", "4WD", "2WD"}:
+        return 0
+    found = _drives_in_text(text)
+    if not found:
+        return 0                      # 没提驱动 = 缺失, 不罚
+
+    def _compat(tok: str) -> bool:
+        if tok == ud:
+            return True
+        if tok == "2WD" and ud in ("FWD", "RWD"):
+            return True
+        if ud == "2WD" and tok in ("FWD", "RWD"):
+            return True
+        return False
+
+    return 1 if any(_compat(t) for t in found) else -1
+
+
+def fitment_adjust(
+    c: Candidate, user_engine: str = "", user_drive: str = "", cfg: Optional[ScoringConfig] = None
+) -> tuple[float, int, int]:
+    """engine/drive 软信号 → 加性微调 (分, 中心 0)。返回 (adjust, engine_signal, drive_signal)。
+
+    用户没选 engine/drive (空串) → 对应信号 0, adjust 不受影响; 两个都空 → adjust 恒 0 (排序不变)。
+    """
+    cfg = cfg or ScoringConfig()
+    text = _candidate_fitment_text(c)
+    es = engine_signal(text, user_engine)
+    ds = drive_signal(text, user_drive)
+    adjust = 0.0
+    if es > 0:
+        adjust += cfg.w_engine_match
+    elif es < 0:
+        adjust -= cfg.w_engine_conflict
+    if ds > 0:
+        adjust += cfg.w_drive_match
+    elif ds < 0:
+        adjust -= cfg.w_drive_conflict
+    return adjust, es, ds
 
 
 def quality_breakdown(c: Candidate, cfg: Optional[ScoringConfig] = None) -> dict:
