@@ -9,15 +9,24 @@ DB-free · model 级: matcher 无 VCdb, 所以只把 Model 对齐到 eBay 词表
   - UNDETERMINED (11504 需 Trim/Engine / 11505 没挂 ACES) / 对不上词表 / API 异常 → 保留 (fail-open)。
 无 VCdb 不深究 trim/engine 级 NOT, 故比带 VCdb 的影子跑略保守 (只砍最确凿的跨车型错配)。
 
-COMPAT_GATE_MODE 三档 (默认 strict):
+COMPAT_GATE_MODE 三档 (默认 strict, 管 **model 级** 删除层):
   strict — NOT_COMPATIBLE 一律删。
   loose  — 只删"listing 标题/兼容属性里没出现查询 model"的 NOT (跨车型); 出现了 (同车型只差
            trim/年) → 保留、当 UNDETERMINED 处理。
   off    — 只标记不删 (= 影子模式, 回退用)。
+
+COMPAT_ENGINE_LEVEL 两档 (默认 shadow, 管 **engine/trim 级** NOT 删不删):
+  shadow  — engine/trim 级 NOT 只记不删 (退回 UNDETERMINED + ``*_shadow`` detail)。量化(40 条)
+            发现引擎级硬删误杀高 (引擎无关件被引擎删、ACES 粗粒度 listing 被 trim+engine 假阴),
+            故先止血: 净删除行为 == model 级 (Phase 2 之前)。
+  enforce — engine/trim 级 NOT 参与删除 (= Phase 2 行为)。护栏 (同 listing 换发动机能 COMPATIBLE
+            才信其 NOT + 类目限定 + 标题守卫) 做好后再切。
+model 级 (Y/M/M) 的 NOT 两档都照删 —— 带不带 engine 都先判 model 级, 不受本开关影响。
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Mapping
 
@@ -25,7 +34,12 @@ from .ebay import EbayApiError, EbayClient
 
 logger = logging.getLogger(__name__)
 
-VALID_MODES = {"strict", "loose", "off"}
+VALID_MODES = {"strict", "loose", "off"}  # model 级删除层 (COMPAT_GATE_MODE)
+
+# 引擎/trim 级 NOT 的处理档 (COMPAT_ENGINE_LEVEL):
+#   shadow  — engine/trim 级 NOT 只记不删 (默认; 量化发现其误杀高, 先止血)。
+#   enforce — engine/trim 级 NOT 参与删除 (= Phase 2 行为; 护栏做好后再切)。
+ENGINE_LEVELS = {"shadow", "enforce"}
 
 
 def _norm(s: Any) -> str:
@@ -180,15 +194,23 @@ def _legal_values(
 
 def evaluate_candidate(
     ebay: EbayClient, vehicle: Mapping[str, Any], candidate: Mapping[str, Any],
-    *, values_cache: dict[Any, Any] | None = None,
+    *, values_cache: dict[Any, Any] | None = None, engine_level: str = "shadow",
 ) -> tuple[str, str]:
     """对一条候选跑 checkCompatibility。返回 (verdict, detail)。verdict ∈ COMPATIBLE / NOT_COMPATIBLE / UNDETERMINED。
 
-    请求带 engine (用户选了) → 升到 engine 级 (spike 证: 主要多剔一刀 NOT_COMPATIBLE):
-      Year/Make/Model+Engine → NOT 删 / COMPATIBLE 留 / UNDETERMINED(11504) 再加 Trim 试。
-    请求无 engine → 保持原 model 级行为不变。
-    engine 对不上 eBay 词表 → 回落 model 级 (不丢 model 级剔除力, 也不误杀)。
+    engine_level (默认 shadow):
+      shadow  — engine/trim 级 NOT **不删** (返回 UNDETERMINED + ``*_shadow`` detail, 只观察)。
+      enforce — engine/trim 级 NOT 参与删除 (= Phase 2 行为)。
+    model 级 (Y/M/M) 的 NOT 两档都照删 —— 那是安全的跨车型阴性, 不受本开关影响。
+
+    请求无 engine → model 级行为不变。engine 对不上 eBay 词表 → 回落 model 级 (其 NOT 属 model 级, 照删)。
     """
+    # engine/trim 级 NOT 的收口: enforce 才真删; shadow 只记不删 (退回 UNDETERMINED)。
+    def _eng_not(detail: str) -> tuple[str, str]:
+        if engine_level == "enforce":
+            return "NOT_COMPATIBLE", detail
+        return "UNDETERMINED", detail + "_shadow"
+
     year = str(vehicle.get("year") or "").strip()
     make = str(vehicle.get("make") or "").strip()
     model = str(vehicle.get("model_guess") or "").strip()
@@ -217,28 +239,26 @@ def evaluate_candidate(
         {"name": "Model", "value": aligned_model},
     ]
 
-    # 2. 无 engine → 原 model 级行为 (不回退)
+    # 2. model 级 (Y/M/M) 永远先判 —— 跨车型阴性, 安全, 两档都照删; 也是 shadow 下唯一的删除依据。
+    #    (放在 engine 之前, 才能保证"带 engine 时 model 级 NOT 仍被删", 净删除行为 == model 级。)
+    model_st = _check_status(ebay, item_id, base_props)
+    if model_st == "NOT_COMPATIBLE":
+        return "NOT_COMPATIBLE", "model_not"
+    model_verdict = "COMPATIBLE" if model_st == "COMPATIBLE" else "UNDETERMINED"
+    model_detail = "model_compat" if model_st == "COMPATIBLE" else "model_undetermined"
+
+    # 无 engine → 到 model 级为止 (原行为)
     if not engine:
-        st = _check_status(ebay, item_id, base_props)
-        if st == "COMPATIBLE":
-            return "COMPATIBLE", "model_compat"
-        if st == "NOT_COMPATIBLE":
-            return "NOT_COMPATIBLE", "model_not"
-        return "UNDETERMINED", "model_undetermined"  # 11504 需 trim/engine
+        return model_verdict, model_detail
 
     # 3. 有 engine → 逐候选类目对齐 engine (只发用户选的那个 engine 的对齐值)
     ebay_engines = _legal_values(ebay, category_id, "Engine", {"Year": year, "Make": make, "Model": aligned_model}, cache)
     aligned_engines = align_engine(engine, ebay_engines) if ebay_engines else []
     if not aligned_engines:
-        # engine 没对上 eBay 词表 → 回落 model 级 (保住 model 级 NOT 剔除, 不误杀)
-        st = _check_status(ebay, item_id, base_props)
-        if st == "NOT_COMPATIBLE":
-            return "NOT_COMPATIBLE", "engine_unaligned_model_not"
-        if st == "COMPATIBLE":
-            return "COMPATIBLE", "engine_unaligned_model_compat"
-        return "UNDETERMINED", "engine_unaligned_model_undetermined"
+        # engine 没对上 eBay 词表 → 就用上面的 model 级结果 (其 NOT 已删过)
+        return model_verdict, "engine_unaligned_" + model_detail
 
-    # 3a. engine 级判定
+    # 3a. engine 级判定 (observation: shadow 不删只记, enforce 才删)
     eng_statuses = []
     for ev in aligned_engines:
         st = _check_status(ebay, item_id, base_props + [{"name": "Engine", "value": ev}])
@@ -246,7 +266,7 @@ def evaluate_candidate(
             return "COMPATIBLE", "engine_compat"
         eng_statuses.append(st)
     if eng_statuses and all(s == "NOT_COMPATIBLE" for s in eng_statuses):
-        return "NOT_COMPATIBLE", "engine_not"  # spike 证实为真负例 → 硬剔
+        return _eng_not("engine_not")  # 默认 shadow: 只记不删 (量化发现引擎级 NOT 误杀高)
 
     # 3b. engine 仍 UNDETERMINED (11504) → 对齐 trim 逐个补发 Y/M/M+Trim+Engine
     if sub_model:
@@ -263,25 +283,33 @@ def evaluate_candidate(
                     return "COMPATIBLE", "trim_engine_compat"  # UNDETERMINED 靠 trim+engine 救活
                 trim_statuses.append(st)
             if trim_statuses and all(s == "NOT_COMPATIBLE" for s in trim_statuses):
-                return "NOT_COMPATIBLE", "trim_engine_not"
+                return _eng_not("trim_engine_not")  # 默认 shadow: 只记不删 (ACES 粗粒度会假阴)
 
-    return "UNDETERMINED", "engine_undetermined"  # 仍未定 → fail-open 保留
+    return model_verdict, "engine_undetermined"  # 仍未定 → fail-open 保留 (沿用 model 级判定)
 
 
 def apply_compat_gate(
     source: Mapping[str, Any], candidates: list[dict[str, Any]], *,
-    ebay: EbayClient, mode: str = "strict",
+    ebay: EbayClient, mode: str = "strict", engine_level: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """在 label=1 候选上跑适配闸。返回 (保留的候选, 被删的候选, 统计)。
 
     所有模式都会给每条 label=1 候选打 ``compat_verdict`` (+ ``compat_gate`` 细节)。
     strict/loose 会把命中删除规则的从"保留"里移出; off 只标记不删。
+
+    engine_level (默认取 env COMPAT_ENGINE_LEVEL, 缺省 shadow): 控制 engine/trim 级 NOT 删不删。
+    shadow 时那些 NOT 退回 UNDETERMINED (只记不删), 净删除行为 == model 级 (Phase 2 之前)。
     """
     mode = mode if mode in VALID_MODES else "strict"
+    engine_level = engine_level or os.getenv("COMPAT_ENGINE_LEVEL", "shadow")
+    engine_level = engine_level if engine_level in ENGINE_LEVELS else "shadow"
     vehicle = source.get("vehicle") or {}
     stats: dict[str, Any] = {
-        "mode": mode, "evaluated": 0, "compatible": 0, "not_compatible": 0,
+        "mode": mode, "engine_level": engine_level,
+        "evaluated": 0, "compatible": 0, "not_compatible": 0,
         "undetermined": 0, "filtered": 0, "kept_not_loose": 0, "removed_item_ids": [],
+        # shadow 观察: engine/trim 级本"会删"但被 shadow 拦下的条数 + itemId (留作护栏分析)
+        "shadow_engine_trim_not": 0, "shadow_not_item_ids": [],
     }
     # 逐候选类目缓存 Model/Engine/Trim 的 eBay 合法值 (key 含 category+prop+filter)
     values_cache: dict[Any, Any] = {}
@@ -293,9 +321,15 @@ def apply_compat_gate(
             kept.append(c)
             continue
 
-        verdict, detail = evaluate_candidate(ebay, vehicle, c, values_cache=values_cache)
+        verdict, detail = evaluate_candidate(
+            ebay, vehicle, c, values_cache=values_cache, engine_level=engine_level
+        )
         stats["evaluated"] += 1
         stats[{"COMPATIBLE": "compatible", "NOT_COMPATIBLE": "not_compatible"}.get(verdict, "undetermined")] += 1
+        # shadow 拦下的 engine/trim NOT (verdict 已是 UNDETERMINED, detail 带 _shadow) → 计数观察
+        if detail in ("engine_not_shadow", "trim_engine_not_shadow"):
+            stats["shadow_engine_trim_not"] += 1
+            stats["shadow_not_item_ids"].append(c.get("item_id"))
 
         would_filter = False
         rule: str | None = None
