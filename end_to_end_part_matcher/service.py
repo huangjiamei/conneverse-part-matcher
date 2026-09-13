@@ -63,6 +63,10 @@ class Vehicle(BaseModel):
     model_guess: str
     vehicle_raw: Optional[str] = ""
     sub_model: Optional[str] = ""  # eBay compat 里叫 Trim; 空串 = "All submodels"
+    # 采集侧新增 (来自前端 VCdb 解析): engine 人读串 (如 "2.0L L4 GAS")、drive (如 "AWD")。
+    # 本阶段只透传收下, 暂不参与任何 lane / compat 闸 —— 等 eBay 对齐 spike 绿了再用。
+    engine: Optional[str] = ""
+    drive: Optional[str] = ""
 
 
 class SourcePartInfo(BaseModel):

@@ -88,6 +88,9 @@ def normalize_source_part_info(data: Mapping[str, Any]) -> dict[str, Any]:
             "model_guess": resolve_vehicle_model(vehicle),
             "vehicle_raw": str(vehicle.get("vehicle_raw") or "").strip(),
             "sub_model": str(vehicle.get("sub_model") or "").strip(),
+            # 采集侧新增: 只透传, 暂不用于任何 lane / compat 闸 (等 eBay 对齐 spike 绿)。
+            "engine": str(vehicle.get("engine") or "").strip(),
+            "drive": str(vehicle.get("drive") or "").strip(),
         },
         "part_description": str(source.get("part_description") or "").strip(),
         "part_type": source.get("part_type"),
