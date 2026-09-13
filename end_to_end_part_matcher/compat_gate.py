@@ -49,6 +49,95 @@ def align_model(our_model: str, ebay_models: list[str]) -> str | None:
     return None
 
 
+# ------------------------------------------------------------------
+# engine / trim 对齐 (镜像 align_model, 但按 spike 的三条精度修正来写)
+# ------------------------------------------------------------------
+
+def _canonical_aspiration(s: str) -> str | None:
+    """把进气归一成一个可跨词表匹配的 token: turbo / supercharg / natural。
+    容忍 "Twin Turbo" / "Turbocharged" 都归 turbo; "Naturally Aspirated" → natural。"""
+    if "turbo" in s:
+        return "turbo"
+    if "supercharg" in s:
+        return "supercharg"
+    if "natural" in s:
+        return "natural"
+    return None
+
+
+def _parse_engine(engine_str: str) -> dict[str, str | None]:
+    """把我方 VCdb engine 人读串 (如 "2.0L L4 GAS Naturally Aspirated") 拆成匹配 token。
+    修正#1: 带上 aspiration —— 否则同排量 NA↔Turbo 会互串。"""
+    s = engine_str.lower()
+    toks = s.split()
+    liter = None
+    m = re.match(r"^(\d+(?:\.\d+)?)l$", toks[0]) if toks else None
+    if m:
+        liter = m.group(1) + "l"  # "2.0l"
+    # block+缸数一般是第 2 个 token (如 l4 / v8); 没有就跳过 (blockType 缺失时)
+    blockcyl = None
+    if len(toks) >= 2 and re.match(r"^[a-z]\d{1,2}$", toks[1]):
+        blockcyl = toks[1]  # "v8" / "l4"
+    fuel = "diesel" if "diesel" in s else "flex" if "flex" in s else "gas" if "gas" in s else None
+    return {"liter": liter, "blockcyl": blockcyl, "fuel": fuel, "asp": _canonical_aspiration(s)}
+
+
+def align_engine(our_engine: str, ebay_engines: list[str]) -> list[str]:
+    """我方 engine 串 → eBay Engine 词表值 (可能多条; 通常唯一)。
+    按 liter + 缸数 + 燃料 + aspiration 全部为子串才算命中 (eBay 串很啰嗦, 容忍 CC/CID/OHV 等)。
+    """
+    p = _parse_engine(our_engine)
+    toks = [t for t in (p["liter"], p["blockcyl"], p["fuel"], p["asp"]) if t]
+    if not toks:
+        return []
+    return [e for e in ebay_engines if all(t in e.lower() for t in toks)]
+
+
+# eBay Trim 词表值 = "{trim} {车身} {N-Door}"。剥掉车身/门数后, 剩下的才是 trim 码。
+# 修正#2: 用"剥车身后精确相等", 不用前缀 —— 否则 EX 串 EX-L、Sport 串 Sport S。
+_BODY_SUFFIXES = sorted(
+    [
+        "crew cab pickup", "extended cab pickup", "standard cab pickup", "club cab pickup",
+        "quad cab pickup", "mega cab pickup", "cab pickup",
+        "sport utility", "sport van", "cargo van", "passenger van", "mini cargo van",
+        "mini passenger van", "sedan", "coupe", "hatchback", "convertible", "wagon",
+        "roadster", "minivan", "van", "pickup", "targa", "hardtop", "liftback", "fastback",
+        "notchback",
+    ],
+    key=len,
+    reverse=True,  # 先剥最长的 (crew cab pickup 早于 pickup)
+)
+
+
+def _norm_trim(s: Any) -> str:
+    """小写, 保留连字符 (EX-L / 4-door 不拆), 其余非字母数字转空格并压缩。"""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9-]+", " ", str(s or "").lower())).strip()
+
+
+def _trim_code(ebay_trim: str) -> str:
+    """从 eBay Trim 值里剥掉尾部 N-Door + 车身短语, 得到 trim 码。"""
+    t = _norm_trim(ebay_trim)
+    t = re.sub(r"\s*\b\d+-door$", "", t).strip()  # 去尾部 "4-door"
+    changed = True
+    while changed and t:
+        changed = False
+        for b in _BODY_SUFFIXES:
+            if t.endswith(" " + b):
+                t = t[: -len(" " + b)].strip()
+                changed = True
+                break
+    return t
+
+
+def align_trim(sub_model: str, ebay_trims: list[str]) -> list[str]:
+    """我方 sub_model → eBay Trim 词表值 (同一 trim 的所有车身变体都算命中)。
+    剥掉车身后 trim 码需与 sub_model 归一化后**精确相等**。"""
+    sm = _norm_trim(sub_model)
+    if not sm:
+        return []
+    return [t for t in ebay_trims if _trim_code(t) == sm]
+
+
 def _model_in_listing_text(model: str, candidate: Mapping[str, Any]) -> bool:
     """loose 判别: listing 标题 / 兼容属性文本里有没有出现查询 model。"""
     m = _norm(model)
@@ -61,16 +150,50 @@ def _model_in_listing_text(model: str, candidate: Mapping[str, Any]) -> bool:
     return f" {m} " in f" {hay} "
 
 
+def _check_status(ebay: EbayClient, item_id: Any, props: list[dict[str, str]]) -> str:
+    """发一次 checkCompatibility, 返回 status 串。API 异常 (11505 没挂 ACES / 404 等)
+    → UNDETERMINED, 保留 (fail-open), 绝不当成 NOT 去删。"""
+    try:
+        res = ebay.check_compatibility(item_id=str(item_id), compatibility_properties=props)
+    except EbayApiError:
+        return "UNDETERMINED"
+    return res.get("compatibilityStatus") or "UNDETERMINED"
+
+
+def _legal_values(
+    ebay: EbayClient, category_id: Any, prop: str, filt: dict[str, str], cache: dict[Any, Any]
+) -> list[str] | None:
+    """拉某 category 下某属性 (Model/Engine/Trim) 的 eBay 合法值 (逐候选类目), 结果缓存。
+    API 异常 → None (调用方据此 fail-open)。"""
+    key = (str(category_id), prop, tuple(sorted(filt.items())))
+    if key in cache:
+        return cache[key]
+    try:
+        vals: list[str] | None = ebay.get_compatibility_property_values(
+            category_id=str(category_id), compatibility_property=prop, filter_dict=filt
+        )
+    except EbayApiError:
+        vals = None
+    cache[key] = vals
+    return vals
+
+
 def evaluate_candidate(
     ebay: EbayClient, vehicle: Mapping[str, Any], candidate: Mapping[str, Any],
-    *, models_cache: dict[tuple[str, str, str], list[str]] | None = None,
+    *, values_cache: dict[Any, Any] | None = None,
 ) -> tuple[str, str]:
-    """对一条候选跑 model 级 checkCompatibility。返回 (verdict, detail)。
-    verdict ∈ COMPATIBLE / NOT_COMPATIBLE / UNDETERMINED。
+    """对一条候选跑 checkCompatibility。返回 (verdict, detail)。verdict ∈ COMPATIBLE / NOT_COMPATIBLE / UNDETERMINED。
+
+    请求带 engine (用户选了) → 升到 engine 级 (spike 证: 主要多剔一刀 NOT_COMPATIBLE):
+      Year/Make/Model+Engine → NOT 删 / COMPATIBLE 留 / UNDETERMINED(11504) 再加 Trim 试。
+    请求无 engine → 保持原 model 级行为不变。
+    engine 对不上 eBay 词表 → 回落 model 级 (不丢 model 级剔除力, 也不误杀)。
     """
     year = str(vehicle.get("year") or "").strip()
     make = str(vehicle.get("make") or "").strip()
     model = str(vehicle.get("model_guess") or "").strip()
+    engine = str(vehicle.get("engine") or "").strip()
+    sub_model = str(vehicle.get("sub_model") or "").strip()
     item_id = candidate.get("item_id")
     category_id = candidate.get("category_id")
     if not (year and make and model and item_id):
@@ -78,42 +201,71 @@ def evaluate_candidate(
     if not category_id:
         return "UNDETERMINED", "no_categoryId"
 
-    cache_key = (str(category_id), year, make)
-    ebay_models: list[str] | None = models_cache.get(cache_key) if models_cache is not None else None
-    if ebay_models is None:
-        try:
-            ebay_models = ebay.get_compatibility_property_values(
-                category_id=str(category_id), compatibility_property="Model",
-                filter_dict={"Year": year, "Make": make},
-            )
-        except EbayApiError:
-            return "UNDETERMINED", "taxonomy_error"
-        if models_cache is not None:
-            models_cache[cache_key] = ebay_models
+    cache = values_cache if values_cache is not None else {}
 
-    aligned = align_model(model, ebay_models)
-    if not aligned:
+    # 1. Model 对齐 (和原来一致)
+    ebay_models = _legal_values(ebay, category_id, "Model", {"Year": year, "Make": make}, cache)
+    if ebay_models is None:
+        return "UNDETERMINED", "taxonomy_error"
+    aligned_model = align_model(model, ebay_models)
+    if not aligned_model:
         return "UNDETERMINED", "model_not_in_ebay"
 
-    try:
-        res = ebay.check_compatibility(
-            item_id=str(item_id),
-            compatibility_properties=[
-                {"name": "Year", "value": year},
-                {"name": "Make", "value": make},
-                {"name": "Model", "value": aligned},
-            ],
-        )
-    except EbayApiError:
-        # 11505 (没挂 ACES) / 404 (item 没了) 等都走这里 → 保留
-        return "UNDETERMINED", "check_error"
+    base_props = [
+        {"name": "Year", "value": year},
+        {"name": "Make", "value": make},
+        {"name": "Model", "value": aligned_model},
+    ]
 
-    status = res.get("compatibilityStatus") or "UNDETERMINED"
-    if status == "COMPATIBLE":
-        return "COMPATIBLE", "model_compat"
-    if status == "NOT_COMPATIBLE":
-        return "NOT_COMPATIBLE", "model_not"
-    return "UNDETERMINED", "model_undetermined"  # 11504 需 trim/engine, 无 DB 不深究
+    # 2. 无 engine → 原 model 级行为 (不回退)
+    if not engine:
+        st = _check_status(ebay, item_id, base_props)
+        if st == "COMPATIBLE":
+            return "COMPATIBLE", "model_compat"
+        if st == "NOT_COMPATIBLE":
+            return "NOT_COMPATIBLE", "model_not"
+        return "UNDETERMINED", "model_undetermined"  # 11504 需 trim/engine
+
+    # 3. 有 engine → 逐候选类目对齐 engine (只发用户选的那个 engine 的对齐值)
+    ebay_engines = _legal_values(ebay, category_id, "Engine", {"Year": year, "Make": make, "Model": aligned_model}, cache)
+    aligned_engines = align_engine(engine, ebay_engines) if ebay_engines else []
+    if not aligned_engines:
+        # engine 没对上 eBay 词表 → 回落 model 级 (保住 model 级 NOT 剔除, 不误杀)
+        st = _check_status(ebay, item_id, base_props)
+        if st == "NOT_COMPATIBLE":
+            return "NOT_COMPATIBLE", "engine_unaligned_model_not"
+        if st == "COMPATIBLE":
+            return "COMPATIBLE", "engine_unaligned_model_compat"
+        return "UNDETERMINED", "engine_unaligned_model_undetermined"
+
+    # 3a. engine 级判定
+    eng_statuses = []
+    for ev in aligned_engines:
+        st = _check_status(ebay, item_id, base_props + [{"name": "Engine", "value": ev}])
+        if st == "COMPATIBLE":
+            return "COMPATIBLE", "engine_compat"
+        eng_statuses.append(st)
+    if eng_statuses and all(s == "NOT_COMPATIBLE" for s in eng_statuses):
+        return "NOT_COMPATIBLE", "engine_not"  # spike 证实为真负例 → 硬剔
+
+    # 3b. engine 仍 UNDETERMINED (11504) → 对齐 trim 逐个补发 Y/M/M+Trim+Engine
+    if sub_model:
+        ebay_trims = _legal_values(ebay, category_id, "Trim", {"Year": year, "Make": make, "Model": aligned_model}, cache)
+        aligned_trims = align_trim(sub_model, ebay_trims) if ebay_trims else []
+        if aligned_trims:
+            eng_for_trim = aligned_engines[0]
+            trim_statuses = []
+            for tv in aligned_trims:
+                st = _check_status(ebay, item_id, base_props + [
+                    {"name": "Trim", "value": tv}, {"name": "Engine", "value": eng_for_trim},
+                ])
+                if st == "COMPATIBLE":
+                    return "COMPATIBLE", "trim_engine_compat"  # UNDETERMINED 靠 trim+engine 救活
+                trim_statuses.append(st)
+            if trim_statuses and all(s == "NOT_COMPATIBLE" for s in trim_statuses):
+                return "NOT_COMPATIBLE", "trim_engine_not"
+
+    return "UNDETERMINED", "engine_undetermined"  # 仍未定 → fail-open 保留
 
 
 def apply_compat_gate(
@@ -131,7 +283,8 @@ def apply_compat_gate(
         "mode": mode, "evaluated": 0, "compatible": 0, "not_compatible": 0,
         "undetermined": 0, "filtered": 0, "kept_not_loose": 0, "removed_item_ids": [],
     }
-    models_cache: dict[tuple[str, str, str], list[str]] = {}
+    # 逐候选类目缓存 Model/Engine/Trim 的 eBay 合法值 (key 含 category+prop+filter)
+    values_cache: dict[Any, Any] = {}
     kept: list[dict[str, Any]] = []
     removed: list[dict[str, Any]] = []
 
@@ -140,7 +293,7 @@ def apply_compat_gate(
             kept.append(c)
             continue
 
-        verdict, detail = evaluate_candidate(ebay, vehicle, c, models_cache=models_cache)
+        verdict, detail = evaluate_candidate(ebay, vehicle, c, values_cache=values_cache)
         stats["evaluated"] += 1
         stats[{"COMPATIBLE": "compatible", "NOT_COMPATIBLE": "not_compatible"}.get(verdict, "undetermined")] += 1
 

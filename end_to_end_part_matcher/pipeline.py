@@ -140,6 +140,8 @@ def match_source_part(
             "compat_gate_removed": [
                 {"item_id": c.get("item_id"), "title": c.get("title"),
                  "compat_verdict": (c.get("compat_gate") or {}).get("verdict"),
+                 # detail 区分 NOT 来源: model_not / engine_not / trim_engine_not / engine_unaligned_model_not
+                 "detail": (c.get("compat_gate") or {}).get("detail"),
                  "rule": (c.get("compat_gate") or {}).get("rule")}
                 for c in gate_removed
             ],

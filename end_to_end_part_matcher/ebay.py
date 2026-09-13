@@ -40,7 +40,10 @@ def request_json(
         req = urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
         try:
             with urllib.request.urlopen(req, timeout=180) as response:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8").strip()
+                # eBay 偶尔 200 + 空 body (尤其 taxonomy 无匹配时) —— json.loads("") 会抛,
+                # 且不是 HTTPError, 会绕过所有调用方的 EbayApiError 捕获。当作"无数据"return {}。
+                return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             if exc.code in RETRYABLE_HTTP_STATUS and attempt < max_attempts:
                 retry_after = (exc.headers or {}).get("Retry-After")
