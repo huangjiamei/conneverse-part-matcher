@@ -74,6 +74,11 @@ class SourcePartInfo(BaseModel):
     part_description: str
     part_type: Optional[str] = ""
     part_number: Optional[str] = ""
+    # 采集侧新增 (前端按 PCdb 件型查合法位置后让用户选的标准位置词, 如 ["Front"]):
+    # 只用于 optimizer 的位置软信号排序, 不进召回、不删。空 = 用户没选/不适用。
+    position: Optional[List[str]] = []
+    # PCdb 件型 id (PartTerminologyID), 目录选件时前端带上; 只透传/观察 (matcher 无 DB 不查)。
+    part_terminology_id: Optional[int] = None
 
 
 class MatchRequest(BaseModel):
@@ -123,6 +128,7 @@ def match(request: MatchRequest) -> dict[str, Any]:
     result["optimizer_result"] = _run_optimizer(
         candidates_raw, preset_name,
         user_engine=veh.engine or "", user_drive=veh.drive or "",
+        user_positions=request.source_part_info.position or [],
     )
     return result
 
@@ -187,9 +193,10 @@ class RerankCandidate(BaseModel):
 class RerankRequest(BaseModel):
     candidates: List[RerankCandidate]
     preset: str = Field(default=DEFAULT_PRESET)
-    # 可选: 用户选的发动机/驱动, 传了就参与软信号排序 (和 /api/match 一致); 不传则排序不受影响。
+    # 可选: 用户选的发动机/驱动/位置, 传了就参与软信号排序 (和 /api/match 一致); 不传则排序不受影响。
     engine: Optional[str] = ""
     drive: Optional[str] = ""
+    position: Optional[List[str]] = []
 
 
 @app.post("/api/rerank")
@@ -211,6 +218,7 @@ def rerank(request: RerankRequest) -> dict[str, Any]:
     optimizer_result = _run_optimizer(
         candidates_raw, request.preset,
         user_engine=request.engine or "", user_drive=request.drive or "",
+        user_positions=request.position or [],
     )
     return {"optimizer_result": optimizer_result}
 
@@ -221,12 +229,12 @@ def rerank(request: RerankRequest) -> dict[str, Any]:
 
 def _run_optimizer(
     candidates_raw: list[dict], preset_name: str,
-    *, user_engine: str = "", user_drive: str = "",
+    *, user_engine: str = "", user_drive: str = "", user_positions: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Run optimizer over label=1 candidates only. Common code path for both endpoints.
 
-    user_engine / user_drive: 用户选的发动机/驱动 (Phase 1 透传来的人读串)。传进 optimizer
-    做软信号排序 (对得上↑ / 冲突↓ / 没提不动), 不删不排除。两个都空 → 排序与不带该信号一致。
+    user_engine / user_drive / user_positions: 用户选的发动机/驱动/位置。传进 optimizer 做软信号
+    排序 (对得上↑ / 冲突↓ / 没提不动), 不删不排除。全空 → 排序与不带该信号一致。
     """
     eligible_for_optim = [
         (idx, c) for idx, c in enumerate(candidates_raw)
@@ -252,7 +260,8 @@ def _run_optimizer(
     try:
         optim_cands = [build_candidate_from_matcher(c) for _, c in eligible_for_optim]
         optim_out = optimize(
-            optim_cands, preset=preset_name, user_engine=user_engine, user_drive=user_drive
+            optim_cands, preset=preset_name,
+            user_engine=user_engine, user_drive=user_drive, user_positions=user_positions,
         )
 
         result["eligible"] = [
@@ -263,10 +272,11 @@ def _run_optimizer(
                 "price_score": round(e["price_score"], 2),
                 "speed_score": round(e["speed_score"], 2),
                 "quality_score": round(e["quality_score"], 2),
-                # engine/drive 软信号明细 (观察用): 加性微调 + 三态信号 (+1/0/-1)
+                # engine/drive/position 软信号明细 (观察用): 加性微调 + 三态信号 (+1/0/-1)
                 "fitment_adjust": round(e.get("fitment_adjust", 0.0), 2),
                 "engine_signal": e.get("engine_signal", 0),
                 "drive_signal": e.get("drive_signal", 0),
+                "position_signal": e.get("position_signal", 0),
             }
             for e in optim_out["eligible"]
         ]

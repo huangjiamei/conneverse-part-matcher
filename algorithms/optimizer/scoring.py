@@ -47,6 +47,9 @@ class ScoringConfig:
     w_engine_conflict: float = 8.0
     w_drive_match: float = 3.0
     w_drive_conflict: float = 3.0
+    # Position 权重最高 (> engine): 候选 Placement 覆盖高(91%)、值标准、方向明确。仍是加性微调、不删。
+    w_position_match: float = 12.0
+    w_position_conflict: float = 12.0
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -302,17 +305,75 @@ def drive_signal(text: str, user_drive: str) -> int:
     return 1 if any(_compat(t) for t in found) else -1
 
 
-def fitment_adjust(
-    c: Candidate, user_engine: str = "", user_drive: str = "", cfg: Optional[ScoringConfig] = None
-) -> tuple[float, int, int]:
-    """engine/drive 软信号 → 加性微调 (分, 中心 0)。返回 (adjust, engine_signal, drive_signal)。
+# ---- position (Placement on Vehicle) 归一 + 按轴比对 ----
+# 归一到 PCdb 同套标准词; 同义词 (Driver Side→Left 等) 收敛。分轴比对避免"跨轴假冲突"
+# (用户只关心 Front, 候选只写了 Left/Right → 候选对前后没表态 → 中性, 不算冲突)。
+_POSITION_SYNONYMS = [
+    ("FRONT", re.compile(r"\bfront\b")),
+    ("REAR", re.compile(r"\b(?:rear|back)\b")),
+    ("LEFT", re.compile(r"\b(?:left|driver(?:'?s)?(?:\s*side)?|lh|l/h|left\s*hand)\b")),
+    ("RIGHT", re.compile(r"\b(?:right|passenger(?:'?s)?(?:\s*side)?|rh|r/h|right\s*hand)\b")),
+    ("UPPER", re.compile(r"\b(?:upper|top)\b")),
+    ("LOWER", re.compile(r"\b(?:lower|bottom)\b")),
+    ("INNER", re.compile(r"\b(?:inner|inside|inboard)\b")),
+    ("OUTER", re.compile(r"\b(?:outer|outside|outboard)\b")),
+]
+# 每个方向词归到一条轴; 同轴内取值互斥, 才谈得上"冲突"。
+_POSITION_AXES = {
+    "FR": {"FRONT", "REAR"}, "LR": {"LEFT", "RIGHT"},
+    "UL": {"UPPER", "LOWER"}, "IO": {"INNER", "OUTER"},
+}
 
-    用户没选 engine/drive (空串) → 对应信号 0, adjust 不受影响; 两个都空 → adjust 恒 0 (排序不变)。
+
+def normalize_positions(values) -> set:
+    """把位置串/列表 (如 "Front, Rear, Left, Right" / "Driver Side" / ["Front"]) 归一成标准词集合。"""
+    if not values:
+        return set()
+    text = (" ".join(values) if isinstance(values, (list, tuple)) else str(values)).lower()
+    return {tok for tok, pat in _POSITION_SYNONYMS if pat.search(text)}
+
+
+def _candidate_positions(c: Candidate) -> set:
+    """候选侧位置集合 C: 从 compatibility 的 Placement on Vehicle / Placement 归一。"""
+    compat = (c.raw or {}).get("compatibility") or {}
+    raw_val = compat.get("Placement on Vehicle") or compat.get("Placement")
+    return normalize_positions(raw_val)
+
+
+def position_signal(user_positions, cand_positions: set) -> int:
+    """+1 / 0 / -1, 按轴比对。
+    C 空 (候选没写) 或 U 空 (用户没选) → 0 (缺失不罚)。
+    在**双方都有取值的轴**上: 有交集→该轴一致; 不相交→冲突。
+    任一共有轴冲突 → -1; 否则有共有轴且都一致 → +1; 无共有轴 (候选对用户关心的轴没表态) → 0。
+    """
+    U = user_positions if isinstance(user_positions, set) else normalize_positions(user_positions)
+    C = cand_positions
+    if not U or not C:
+        return 0
+    shared_agree = False
+    for axis in _POSITION_AXES.values():
+        u_ax, c_ax = U & axis, C & axis
+        if u_ax and c_ax:
+            if u_ax & c_ax:
+                shared_agree = True
+            else:
+                return -1               # 同一轴上正相反 (如用户 Front、候选只 Rear)
+    return 1 if shared_agree else 0
+
+
+def fitment_adjust(
+    c: Candidate, user_engine: str = "", user_drive: str = "",
+    user_positions=None, cfg: Optional[ScoringConfig] = None,
+) -> tuple[float, dict]:
+    """engine/drive/position 软信号 → 加性微调 (分, 中心 0)。返回 (adjust, signals)。
+
+    用户没选某维 → 该维信号 0; 全没选 → adjust 恒 0 (排序不变)。position 权重最高。
     """
     cfg = cfg or ScoringConfig()
     text = _candidate_fitment_text(c)
     es = engine_signal(text, user_engine)
     ds = drive_signal(text, user_drive)
+    pos_sig = position_signal(user_positions, _candidate_positions(c)) if user_positions else 0
     adjust = 0.0
     if es > 0:
         adjust += cfg.w_engine_match
@@ -322,7 +383,11 @@ def fitment_adjust(
         adjust += cfg.w_drive_match
     elif ds < 0:
         adjust -= cfg.w_drive_conflict
-    return adjust, es, ds
+    if pos_sig > 0:
+        adjust += cfg.w_position_match
+    elif pos_sig < 0:
+        adjust -= cfg.w_position_conflict
+    return adjust, {"engine": es, "drive": ds, "position": pos_sig}
 
 
 def quality_breakdown(c: Candidate, cfg: Optional[ScoringConfig] = None) -> dict:

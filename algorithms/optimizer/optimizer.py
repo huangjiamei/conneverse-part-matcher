@@ -43,6 +43,7 @@ def optimize(
     weights_speed: Optional[float] = None,
     user_engine: str = "",
     user_drive: str = "",
+    user_positions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     对候选列表跑一遍 gate + 打分 + 排序。
@@ -143,16 +144,17 @@ def optimize(
             ps = price_score(landed, anchor)
             ss = speed_score(c.delivery_days_max, scoring_cfg.d_fast, scoring_cfg.d_slow)
             qs = quality_score(c, scoring_cfg)
-            # engine/drive 软信号: 加性微调 (对得上↑ / 冲突↓ / 没提不动), 不进大分、不删。
-            # 用户没选 (两个都空) → adjust 恒 0, total 与不带该信号时逐条一致。
-            adj, es, ds = fitment_adjust(c, user_engine, user_drive, scoring_cfg)
+            # engine/drive/position 软信号: 加性微调 (对得上↑ / 冲突↓ / 没提不动), 不进大分、不删。
+            # 用户没选 (都空) → adjust 恒 0, total 与不带该信号时逐条一致。position 权重最高。
+            adj, sig = fitment_adjust(c, user_engine, user_drive, user_positions, scoring_cfg)
             e["landed"] = landed
             e["price_score"] = ps
             e["speed_score"] = ss
             e["quality_score"] = qs
             e["fitment_adjust"] = adj
-            e["engine_signal"] = es
-            e["drive_signal"] = ds
+            e["engine_signal"] = sig["engine"]
+            e["drive_signal"] = sig["drive"]
+            e["position_signal"] = sig["position"]
             e["total"] = wp * ps + ws * ss + wq * qs + adj
 
         eligible.sort(key=lambda e: e["total"], reverse=True)

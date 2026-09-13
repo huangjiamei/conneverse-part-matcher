@@ -94,6 +94,9 @@ def normalize_source_part_info(data: Mapping[str, Any]) -> dict[str, Any]:
         },
         "part_description": str(source.get("part_description") or "").strip(),
         "part_type": source.get("part_type"),
+        # 采集侧新增: 用户选的标准位置词 (如 ["Front"]); 只透传给 optimizer 的位置软信号, 不进召回。
+        "position": [str(p).strip() for p in (source.get("position") or []) if str(p).strip()],
+        "part_terminology_id": source.get("part_terminology_id"),
         "part_number": part_number,
         "part_number_normalized": normalize_mpn(source.get("part_number_normalized") or part_number),
     }
